@@ -70,7 +70,9 @@ const server = new McpServer(
   {
     instructions:
       "ClipFlow est l'atelier de clipping qui tourne en local. Flux de travail : " +
-      "`whats_next` pour savoir par quoi commencer, `get_rush` et `get_transcript` pour lire la matière, " +
+      "`whats_next` pour savoir par quoi commencer. Pour ajouter de la matière, `probe_source` puis " +
+      "`ingest_link` acceptent un lien YouTube, une rediffusion ou un direct Twitch. Ensuite " +
+      "`get_rush` et `get_transcript` pour lire la matière, " +
       "puis `submit_edit_plan` pour poser le montage (plusieurs coupes par clip sont encouragées : " +
       "retirer une digression, recoller deux passages distants). Le rendu FFmpeg est automatique. " +
       "Ensuite `review_clip` pour valider, ce qui dépose le clip dans le dossier synchronisé. " +
@@ -151,6 +153,43 @@ server.registerTool(
     if (transcript) q.set("transcript", transcript);
     return text(await call(`/api/rushes/${encodeURIComponent(rushId)}/brief?${q}`));
   },
+);
+
+server.registerTool(
+  "probe_source",
+  {
+    title: "Inspecter un lien",
+    description:
+      "Dit ce qu'il y a derrière un lien sans rien télécharger : titre, durée, chaîne, format, et " +
+      "s'il s'agit d'un direct en cours. À appeler avant d'importer, pour décider s'il faut prendre " +
+      "toute la source ou seulement une tranche.",
+    inputSchema: { url: z.string().describe("Lien YouTube, Twitch, Vimeo, ou fichier direct") },
+  },
+  async ({ url }) => text(await call("/api/sources/probe", { method: "POST", body: { url } })),
+);
+
+server.registerTool(
+  "ingest_link",
+  {
+    title: "Importer un lien comme rush",
+    description:
+      "Récupère la source et en fait un rush. Sur une vidéo publiée, `startSec` et `endSec` évitent " +
+      "de rapatrier des heures pour n'en garder que quelques minutes. Sur un direct en cours, le " +
+      "passé n'est pas récupérable : `recordSeconds` capture une fenêtre à partir de maintenant. " +
+      "Avec `prepare`, la transcription et la détection des moments enchaînent.",
+    inputSchema: {
+      url: z.string(),
+      clientId: z.string().optional().describe("Client auquel rattacher ce rush"),
+      title: z.string().optional(),
+      startSec: z.number().min(0).optional(),
+      endSec: z.number().min(0).optional(),
+      recordSeconds: z.number().int().min(30).max(14_400).optional().describe("Durée de capture d'un direct"),
+      maxHeight: z.number().int().min(360).max(2160).optional().describe("1080 par défaut"),
+      clipsTarget: z.number().int().min(1).max(20).optional(),
+      prepare: z.boolean().optional().describe("Enchaîner transcription et détection (vrai conseillé)"),
+    },
+  },
+  async (args) => text(await call("/api/sources/ingest", { method: "POST", body: args })),
 );
 
 // ── Montage ─────────────────────────────────────────────────

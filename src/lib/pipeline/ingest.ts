@@ -13,6 +13,7 @@ import { probeMedia } from "../render/ffmpeg";
 import { detectMoments, DETECTOR_VERSION } from "./moments";
 import { generateHooks } from "./hooks";
 import type { Rush, RushOrigin } from "@prisma/client";
+import { fetchSource, probeSource, looksLikeDirectMedia, describeSource, type FetchOptions, type SourceInfo } from "../ingest/source";
 
 export type IngestInput = {
   title: string;
@@ -233,4 +234,91 @@ export async function detectRushMoments(
   });
 
   return { moments: detected.length, hooks: hookCount, warnings };
+}
+
+export type LinkIngestInput = {
+  url: string;
+  clientId?: string | null;
+  uploaderId?: string | null;
+  title?: string;
+  /** Ne prendre qu'une tranche de la source. */
+  startSec?: number;
+  endSec?: number;
+  /** Durée de capture si la source est un direct en cours. */
+  recordSeconds?: number;
+  maxHeight?: number;
+  clipsTarget?: number;
+  dueAt?: Date | null;
+};
+
+/**
+ * Dépose un lien — VOD YouTube, rediffusion ou direct Twitch, ou tout
+ * autre site connu de yt-dlp — et en fait un rush prêt à analyser.
+ *
+ * Un fichier directement adressable n'est pas rapatrié : on le sonde sur
+ * place, ce qui évite de recopier des gigaoctets pour rien.
+ */
+export async function ingestFromLink(input: LinkIngestInput): Promise<{ rush: Rush; info: SourceInfo }> {
+  // Lien direct vers un fichier : la sonde suffit, pas de résolution.
+  if (looksLikeDirectMedia(input.url)) {
+    const rush = await ingestRush({
+      title: input.title ?? input.url.split("/").pop() ?? "Rush importé",
+      sourceUrl: input.url,
+      clientId: input.clientId,
+      uploaderId: input.uploaderId,
+      language: "fr",
+      origin: "SOURCED",
+      clipsTarget: input.clipsTarget,
+      dueAt: input.dueAt,
+    });
+    return { rush, info: { ok: true, kind: "video", webpageUrl: input.url } };
+  }
+
+  const probe = await probeSource(input.url);
+  if (!probe.ok) {
+    throw new Error(probe.error ?? "Lien non résolu.");
+  }
+  if (probe.kind === "playlist") {
+    throw new Error(
+      `Ce lien est une playlist de ${probe.entryCount ?? "?"} vidéos. Donnez le lien d'une vidéo précise.`,
+    );
+  }
+
+  const options: FetchOptions = {
+    startSec: input.startSec,
+    endSec: input.endSec,
+    recordSeconds: input.recordSeconds,
+    maxHeight: input.maxHeight,
+  };
+
+  const fetched = await fetchSource(input.url, options);
+  if (!fetched.ok || !fetched.filePath) {
+    throw new Error(fetched.error ?? "Récupération de la source échouée.");
+  }
+
+  const rush = await ingestRush({
+    title: input.title ?? probe.title ?? "Rush importé",
+    description: [probe.uploader ? `Source : ${probe.uploader}` : null, probe.description?.slice(0, 500)]
+      .filter(Boolean)
+      .join("\n\n"),
+    filePath: fetched.filePath,
+    clientId: input.clientId,
+    uploaderId: input.uploaderId,
+    language: probe.language ?? "fr",
+    origin: "SOURCED",
+    sourceNote: `${describeSource(probe)} — ${probe.webpageUrl ?? input.url}`,
+    clipsTarget: input.clipsTarget,
+    dueAt: input.dueAt,
+  });
+
+  await logEvent({
+    stage: "ingest",
+    entity: `rush:${rush.id}`,
+    message: fetched.recordedSeconds
+      ? `Direct capturé pendant ${Math.round(fetched.recordedSeconds / 60)} min`
+      : `Lien importé depuis ${probe.extractor ?? "une source externe"}`,
+    data: { url: probe.webpageUrl, sizeBytes: fetched.sizeBytes },
+  });
+
+  return { rush, info: probe };
 }

@@ -9,7 +9,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { syncAllMemberships, resetMonthlyQuotas } from "@/lib/whop/sync";
-import { transcribeRush, detectRushMoments, ingestRush } from "@/lib/pipeline/ingest";
+import { transcribeRush, detectRushMoments, ingestRush, ingestFromLink } from "@/lib/pipeline/ingest";
 import { renderPlan, autoPlanFromMoment, reviewClip } from "@/lib/pipeline/clips";
 import { createPlansFromInput } from "@/lib/pipeline/editPlan";
 import { prepareRush } from "@/lib/pipeline/orchestrator";
@@ -88,6 +88,54 @@ export async function ingestUrlAction(formData: FormData) {
   const rush = await ingestRush({ title, sourceUrl, clientId, language: "fr", origin });
   revalidatePath("/rushes");
   redirect(`/rushes/${rush.id}`);
+}
+
+/**
+ * Import d'un lien : VOD YouTube, rediffusion ou direct Twitch, ou tout
+ * site connu de yt-dlp. Un direct en cours est capturé à partir de
+ * maintenant, puisqu'on ne peut pas remonter son passé.
+ */
+export async function ingestLinkAction(formData: FormData) {
+  const url = String(formData.get("url") ?? "").trim();
+  if (!url) throw new Error("Aucun lien fourni.");
+
+  const num = (k: string): number | undefined => {
+    const raw = formData.get(k);
+    if (raw === null || String(raw).trim() === "") return undefined;
+    const v = Number(raw);
+    return Number.isFinite(v) && v >= 0 ? v : undefined;
+  };
+
+  const minutes = num("recordMinutes");
+  let rushId: string;
+  try {
+    const { rush } = await ingestFromLink({
+      url,
+      clientId: formData.get("clientId") ? String(formData.get("clientId")) : null,
+      title: formData.get("title") ? String(formData.get("title")) : undefined,
+      startSec: num("startSec"),
+      endSec: num("endSec"),
+      recordSeconds: minutes ? Math.round(minutes * 60) : undefined,
+      maxHeight: num("maxHeight"),
+    });
+    rushId = rush.id;
+  } catch (err) {
+    // Le motif doit rester lisible dans le journal : lien privé, playlist,
+    // vérification YouTube, direct terminé…
+    await prisma.pipelineEvent.create({
+      data: {
+        stage: "ingest",
+        entity: `source:${url.slice(0, 120)}`,
+        level: "error",
+        message: (err as Error).message,
+      },
+    });
+    revalidatePath("/rushes");
+    return;
+  }
+
+  revalidatePath("/rushes");
+  redirect(`/rushes/${rushId}`);
 }
 
 export async function uploadRushAction(formData: FormData) {

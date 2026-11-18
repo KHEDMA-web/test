@@ -323,6 +323,40 @@ client servi un jour plus tard.
 
 ## ② Le rush
 
+### Déposer n'importe quel lien
+
+Un champ, un lien, et la plateforme s'occupe du reste — `yt-dlp` couvre près
+de deux mille sites, donc il n'y a pas une intégration par plateforme à
+maintenir.
+
+| Source | Ce qui se passe |
+|---|---|
+| Vidéo YouTube, Vimeo… | téléchargée, ou seulement la tranche demandée |
+| Rediffusion Twitch | idem — `startSec`/`endSec` évitent de rapatrier six heures pour en garder dix minutes |
+| **Direct Twitch en cours** | son passé n'est pas récupérable : la capture démarre à l'instant où vous validez, pour la durée indiquée |
+| Lien direct `.mp4` | rien n'est rapatrié, le fichier est sondé sur place |
+| Playlist ou chaîne | refusé avec un message clair : il faut le lien d'une vidéo |
+
+Depuis Claude Desktop, deux outils : `probe_source` dit ce qu'il y a derrière
+un lien sans rien télécharger, `ingest_link` le transforme en rush et peut
+enchaîner transcription et détection.
+
+**Ce qui est vérifié, et ce qui ne l'est pas.** La détection de source est
+testée sur Twitch, direct compris (chaîne en cours reconnue, 1920×1080). Sur
+YouTube, elle a fonctionné puis l'adresse de test a été bloquée : les IP de
+datacenter se font demander une vérification anti-robot. Depuis une connexion
+domestique, c'est en général transparent ; sinon, exportez vos cookies et
+renseignez `CLIPFLOW_YTDLP_COOKIES`. **Le téléchargement lui-même n'a pas pu
+être exécuté depuis l'environnement de développement** — à valider sur votre
+machine avec un vrai lien client.
+
+**Un mot sur le cadre.** L'usage légitime, c'est la matière de vos clients :
+ils vous donnent le lien de leur propre chaîne, ou vous autorisent à aller la
+chercher. Récupérer la vidéo d'un tiers sans accord est un autre sujet, et
+l'outil ne vous couvre pas là-dessus.
+
+### Ce qui suit
+
 Déposé par le client ou sourcé par moi (la distinction est tracée et pèse dans
 la qualification). Sonde `ffprobe`, puis transcription derrière une interface
 unique — OpenAI Whisper, Deepgram, `whisper` local, ou mock — avec horodatage

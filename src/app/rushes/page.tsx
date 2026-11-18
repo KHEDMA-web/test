@@ -2,7 +2,7 @@ import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { PageHeader, StatusBadge, Empty, Stat } from "@/components/ui";
 import { SubmitButton } from "@/components/SubmitButton";
-import { demoRushAction, ingestUrlAction, uploadRushAction } from "@/app/actions";
+import { demoRushAction, ingestLinkAction, uploadRushAction } from "@/app/actions";
 import { formatDuration, relativeTime } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -71,21 +71,49 @@ export default async function RushesPage({
             <div><SubmitButton pendingLabel="Analyse…">Importer le fichier</SubmitButton></div>
           </form>
 
-          <form action={ingestUrlAction} style={{ display: "grid", gap: "0.55rem" }}>
-            <div style={{ fontSize: "0.76rem", color: "var(--text-muted)", fontWeight: 600 }}>Depuis une URL</div>
-            <input className="input" name="sourceUrl" type="url" placeholder="https://cdn.exemple.com/episode.mp4" required />
-            <input className="input" name="title" placeholder="Titre du rush" required />
+          <form action={ingestLinkAction} style={{ display: "grid", gap: "0.55rem" }}>
+            <div style={{ fontSize: "0.76rem", color: "var(--text-muted)", fontWeight: 600 }}>
+              Depuis un lien
+            </div>
+            <input
+              className="input"
+              name="url"
+              type="url"
+              placeholder="YouTube, Twitch (rediffusion ou direct), Vimeo, ou un .mp4 direct"
+              required
+            />
+            <input className="input" name="title" placeholder="Titre (sinon celui de la source)" />
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
               <select className="select" name="clientId" defaultValue={clientFilter ?? clients[0]?.id ?? ""}>
                 <option value="">Aucun client</option>
                 {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
-              <select className="select" name="origin" defaultValue="CLIENT_UPLOAD">
-                <option value="CLIENT_UPLOAD">Fourni par le client</option>
-                <option value="SOURCED">Trouvé par moi</option>
+              <select className="select" name="maxHeight" defaultValue="1080">
+                <option value="720">720p — rapide</option>
+                <option value="1080">1080p — recommandé</option>
+                <option value="1440">1440p — si la source le permet</option>
               </select>
             </div>
-            <div><SubmitButton pendingLabel="Analyse…">Importer l'URL</SubmitButton></div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "0.5rem" }}>
+              <label style={{ fontSize: "0.72rem", color: "var(--text-faint)", display: "grid", gap: "0.2rem" }}>
+                Début (s)
+                <input className="input mono" name="startSec" type="number" min={0} placeholder="tout" />
+              </label>
+              <label style={{ fontSize: "0.72rem", color: "var(--text-faint)", display: "grid", gap: "0.2rem" }}>
+                Fin (s)
+                <input className="input mono" name="endSec" type="number" min={0} placeholder="tout" />
+              </label>
+              <label style={{ fontSize: "0.72rem", color: "var(--text-faint)", display: "grid", gap: "0.2rem" }}>
+                Direct : minutes
+                <input className="input mono" name="recordMinutes" type="number" min={1} max={240} placeholder="10" />
+              </label>
+            </div>
+            <p style={{ margin: 0, fontSize: "0.72rem", color: "var(--text-faint)", lineHeight: 1.5 }}>
+              Sur une vidéo publiée, début et fin évitent de rapatrier six heures de direct pour en garder
+              dix minutes. Sur un <strong>direct en cours</strong>, son passé n'est pas récupérable : la
+              capture démarre à l'instant où vous validez, pour la durée indiquée.
+            </p>
+            <div><SubmitButton pendingLabel="Récupération…">Importer le lien</SubmitButton></div>
           </form>
         </div>
       </section>
