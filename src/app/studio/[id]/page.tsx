@@ -55,7 +55,7 @@ export default async function ClipPage({ params }: { params: Promise<{ id: strin
       <PageHeader
         stage="Étage 4 · Montage"
         title={clip.title}
-        description={`${clip.origin === "AUTO" ? "Brouillon automatique" : `Version ${clip.version} déposée par le clipper`} · ${formatDuration(clip.durationSec)} · ${clip.width ?? "?"}×${clip.height ?? "?"} · rush « ${clip.rush.title} »`}
+        description={`${clip.origin === "AUTO" ? "Brouillon automatique" : `Version ${clip.version} déposée par le clipper`} · ${formatDuration(clip.durationSec)} · ${clip.width ?? "?"}×${clip.height ?? "?"} · rush : ${clip.rush.title}`}
         actions={<Link href="/studio" className="btn">← Tous les clips</Link>}
       />
 

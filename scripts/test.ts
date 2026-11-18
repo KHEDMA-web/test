@@ -272,6 +272,19 @@ async function main() {
     assert(extractNumericFigures("68 % des créateurs").length > 0, "68 % doit être retenu");
   });
 
+  check("les mots vides accentués sont bien filtrés (comparaison sans accents)", () => {
+    // Régression : la liste est écrite accentuée mais comparée sans accents.
+    // Sans normalisation du Set, « même » remontait comme sujet de hook.
+    const topics = extractTopics("C'est la même erreur que tout le monde répète déjà.");
+    assert(!topics.includes("même") && !topics.includes("meme"), `mot vide retenu : ${topics.join(", ")}`);
+  });
+
+  check("un numéral écrit en lettres n'est pas un sujet de hook", () => {
+    const topics = extractTopics("C'est les deux ans où j'ai eu peur de demander de l'aide.");
+    assert(!topics.includes("deux"), `numéral retenu : ${topics.join(", ")}`);
+    assert(topics.includes("aide"), "le vrai sujet doit ressortir");
+  });
+
   check("l'extraction du sujet évite les formes verbales", () => {
     const topics = extractTopics("Tu ne construis pas une entreprise sur une émotion, mais sur des contraintes.");
     assert(topics.length > 0, "aucun sujet extrait");

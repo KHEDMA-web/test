@@ -41,7 +41,13 @@ export const HOUSEKEEPING = [
   "lien en description", "sponsor", "partenaire de cet épisode", "on va structurer",
 ];
 
-/** Mots vides, exclus de l'extraction de mots-clés. */
+/**
+ * Mots vides, exclus de l'extraction de mots-clés et de sujets.
+ * La liste est écrite accentuée pour rester lisible, mais l'ensemble est
+ * construit sur la forme normalisée : les comparaisons se font sans
+ * accents, et sans cela « même » ne filtrait pas « meme », qui remontait
+ * alors comme sujet de hook. (`normalize` est hissée, l'appel ici est sûr.)
+ */
 export const STOPWORDS = new Set([
   "le","la","les","un","une","des","de","du","au","aux","et","ou","mais","donc","or","ni","car",
   "que","qui","quoi","dont","où","à","dans","sur","sous","avec","sans","pour","par","en","vers",
@@ -51,7 +57,7 @@ export const STOPWORDS = new Set([
   "pas","plus","moins","très","trop","bien","tout","tous","toute","toutes","même","aussi","alors",
   "quand","comme","si","oui","non","ça","cela","c'est","j'ai","il y a","y a","là","ici","peu",
   "beaucoup","vraiment","juste","déjà","encore","toujours","jamais","rien","chose","truc","gens",
-]);
+].map((w) => normalize(w)));
 
 export function normalize(text: string): string {
   return text
@@ -136,7 +142,7 @@ export function extractTopics(text: string, limit = 5): string[] {
 
   const bump = (surface: string, weight: number) => {
     const key = normalize(surface);
-    if (!key || STOPWORDS.has(key) || VERB_LIKE.test(key)) return;
+    if (!key || STOPWORDS.has(key) || NUMERALS.has(key) || VERB_LIKE.test(key)) return;
     const prev = counts.get(key);
     counts.set(key, { surface: prev?.surface ?? surface.toLowerCase(), weight: (prev?.weight ?? 0) + weight });
   };
@@ -152,6 +158,14 @@ export function extractTopics(text: string, limit = 5): string[] {
     .slice(0, limit)
     .map((e) => e.surface);
 }
+
+/** Numéraux écrits en toutes lettres : mauvais sujets de hook (« les deux ans »). */
+const NUMERALS = new Set([
+  "zero", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf", "dix",
+  "onze", "douze", "treize", "quinze", "vingt", "trente", "quarante", "cinquante",
+  "soixante", "cent", "cents", "mille", "million", "millions", "milliard", "milliards",
+  "premier", "premiere", "deuxieme", "troisieme",
+]);
 
 /** Terminaisons de formes verbales conjuguées : écartées des sujets de hook. */
 const VERB_LIKE = /(?:ais|ait|aient|erai|erais|erait|eront|ons|ez|ent|é|és|ée|ées|ir|er|oir|is|it|us|ut)$/;
