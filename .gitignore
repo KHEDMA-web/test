@@ -8,3 +8,7 @@ next-env.d.ts
 /storage
 /public/media
 .DS_Store
+
+# Modèles de détection de visage : récupérés par scripts/setup-face-tracking.sh
+/models
+.env.bak

@@ -12,6 +12,7 @@ import { mkdir, writeFile, stat, rm, mkdtemp } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { buildAss, remapSegmentsForCuts, type Cut } from "./ass";
+import { trackFaces, writeSendcmdFile, describeTrack, type FaceTrack } from "./faceTrack";
 import type { Segment } from "../transcription/types";
 
 const exec = promisify(execFile);
@@ -83,7 +84,8 @@ export async function probeMedia(source: string): Promise<MediaProbe> {
 }
 
 /** Cadrage vertical : recadrage centré, ou fond flou pour garder le plan large. */
-export type FramingMode = "cover" | "fit-blur" | "fit-bars";
+/** `face` suit les visages ; les trois autres sont des cadrages fixes. */
+export type FramingMode = "cover" | "fit-blur" | "fit-bars" | "face";
 
 export type RenderResult = {
   outputPath: string;
@@ -94,6 +96,8 @@ export type RenderResult = {
   log: string;
   cuts: Cut[];
   recipe: Record<string, unknown>;
+  /** Ce que le suivi de visage a trouvé, quand il a été demandé. */
+  tracking?: string[];
 };
 
 /**
@@ -177,10 +181,56 @@ export async function renderMultiCut(args: MultiCutRender): Promise<RenderResult
     const videoLabels: string[] = [];
     const audioLabels: string[] = [];
 
+    const tracking: string[] = [];
+
     for (const [i, cut] of cuts.entries()) {
       graph.push(`[0:v]trim=start=${cut.start.toFixed(3)}:end=${cut.end.toFixed(3)},setpts=PTS-STARTPTS[c${i}t]`);
-      const { graph: frame, label } = framingChain(framing, i, w, h, cut.zoom);
-      graph.push(...frame);
+
+      let label: string;
+      if (framing === "face") {
+        const track = await trackFaces({ source: args.source, startSec: cut.start, endSec: cut.end, aspect: w / h });
+        tracking.push(`coupe ${i + 1} : ${describeTrack(track)}`);
+
+        if (track.ok && track.keyframes.length > 0 && track.cropWidth > 0 && track.cropWidth < track.width) {
+          // `sendcmd` déplace la fenêtre au fil du temps ; il doit précéder
+          // le `crop` qu'il pilote, et le crop porte une étiquette unique.
+          // Étiquette propre à cette coupe : les commandes ne doivent pas
+          // atteindre le recadrage des autres coupes du même graphe.
+          const cropLabel = `fc${i}`;
+          const cmdFile = await writeSendcmdFile(
+            workDir,
+            i,
+            `crop@${cropLabel}`,
+            track.keyframes,
+            cut.end - cut.start,
+          );
+          graph.push(
+            `[c${i}t]sendcmd=f='${escapeFilterPath(cmdFile)}',` +
+              `crop@${cropLabel}=w=${track.cropWidth}:h=${track.height}:x=${track.keyframes[0].x}:y=0,` +
+              `scale=${w}:${h}[c${i}f]`,
+          );
+          label = `c${i}f`;
+        } else {
+          // Suivi indisponible : on retombe sur le recadrage centré plutôt
+          // que de faire échouer le rendu.
+          tracking.push(`coupe ${i + 1} : repli sur le recadrage centré`);
+          const fallback = framingChain("cover", i, w, h, cut.zoom);
+          graph.push(...fallback.graph);
+          label = fallback.label;
+        }
+      } else {
+        const { graph: frame, label: framed } = framingChain(framing, i, w, h, cut.zoom);
+        graph.push(...frame);
+        label = framed;
+      }
+
+      // Le zoom du plan s'applique après le suivi, comme pour les autres cadrages.
+      if (framing === "face" && cut.zoom && cut.zoom > 1.001) {
+        const z = Math.min(1.5, cut.zoom);
+        graph.push(`[${label}]scale=iw*${z.toFixed(3)}:ih*${z.toFixed(3)},crop=${w}:${h}[c${i}z]`);
+        label = `c${i}z`;
+      }
+
       // `concat` exige un ratio de pixel identique sur toutes ses entrées ;
       // un zoom le modifie légèrement, d'où la normalisation explicite.
       graph.push(`[${label}]setsar=1,format=yuv420p[v${i}]`);
@@ -283,6 +333,7 @@ export async function renderMultiCut(args: MultiCutRender): Promise<RenderResult
       command: ["ffmpeg", ...ffArgs].join(" "),
       log: stderr.slice(-4000),
       cuts,
+      tracking: tracking.length ? tracking : undefined,
       recipe: {
         cuts: cuts.length,
         totalDuration: Number(totalDuration.toFixed(2)),

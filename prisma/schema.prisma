@@ -127,6 +127,7 @@ model Client {
   clips        Clip[]
   editPlans    EditPlan[]
   publications Publication[]
+  deliveries   Delivery[]
 
   @@index([status, score])
 }
@@ -445,9 +446,47 @@ model Clip {
 
   reviews      ClipReview[]
   publications Publication[]
+  deliveries   Delivery[]
 
   @@index([status])
   @@index([clientId, status])
+}
+
+enum DeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
+/// Dépôt du clip fini dans le dossier synchronisé (Drive, Dropbox…).
+/// C'est la remise réelle : le fichier quitte la plateforme et part chez
+/// le client, ou vers l'outil qui publiera.
+model Delivery {
+  id       String  @id @default(cuid())
+  clipId   String
+  clip     Clip    @relation(fields: [clipId], references: [id], onDelete: Cascade)
+  clientId String?
+  client   Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  /// Dossier racine au moment de la livraison (le Drive local).
+  rootDir     String
+  /// Chemin du fichier vidéo, relatif à la racine.
+  filePath    String
+  /// Fiche de légende déposée à côté de la vidéo.
+  sidecarPath String?
+  thumbPath   String?
+  /// URL publique, si le dossier est aussi exposé en ligne.
+  publicUrl   String?
+
+  sizeBytes BigInt?
+  status    DeliveryStatus @default(PENDING)
+  error     String?
+
+  deliveredAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([clipId])
+  @@index([status])
 }
 
 model ClipReview {

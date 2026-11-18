@@ -52,6 +52,10 @@ const STATUS_STYLES: Record<string, { bg: string; fg: string; label?: string }> 
   QUEUED: { bg: "#64748b18", fg: "#94a3b8", label: "En file" },
   SCHEDULING: { bg: "#06b6d418", fg: "#22d3ee", label: "Envoi…" },
   CANCELED: { bg: "#64748b18", fg: "#94a3b8", label: "Annulé" },
+  // Livraisons
+  DELIVERED: { bg: "#22c55e18", fg: "#4ade80", label: "Déposé" },
+  // Plans de montage
+  RENDERED: { bg: "#22c55e18", fg: "#4ade80", label: "Rendu" },
   // Moments
   CANDIDATE: { bg: "#64748b18", fg: "#94a3b8", label: "Candidat" },
   SELECTED: { bg: "#6c5cff18", fg: "#a5b4fc", label: "Retenu" },

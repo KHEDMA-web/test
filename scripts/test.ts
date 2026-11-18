@@ -8,6 +8,7 @@ import crypto from "node:crypto";
 import { qualifyClient, productionPriority, MIN_VIABLE_PRICE_PER_CLIP_CENTS } from "../src/lib/whop/qualify";
 import { extractJsonBlock, parsePlanInput, validateClip } from "../src/lib/pipeline/editPlan";
 import { remapSegmentsForCuts } from "../src/lib/render/ass";
+import { buildSendcmd } from "../src/lib/render/faceTrack";
 import { verifyWhopWebhook, signPayload, WebhookVerificationError } from "../src/lib/whop/webhook";
 import { detectMoments } from "../src/lib/pipeline/moments";
 import { generateHeuristicHooks, scoreHook } from "../src/lib/pipeline/hooks";
@@ -505,6 +506,31 @@ async function main() {
     });
     assert(!ass.includes("{ et"), "une accolade non échappée casserait le rendu libass");
     assert(ass.includes("\\N"), "le retour à la ligne doit devenir \\N");
+  });
+
+  console.log("\n── Étage 4 · recadrage suiveur ──");
+
+  check("les commandes de recadrage visent le filtre, pas l'étiquette seule", () => {
+    // Régression : avec « fc0 » comme cible, ffmpeg ignore la commande en
+    // silence et le cadre reste figé sur sa position de départ.
+    const cmd = buildSendcmd("crop@fc0", [{ t: 0, x: 100 }, { t: 0.2, x: 140 }], 1.0);
+    assert(cmd.includes("crop@fc0"), `cible incorrecte :\n${cmd}`);
+    assert(!/^\d[\d.]*-[\d.]+ \[enter\] fc0 /m.test(cmd), "la cible ne doit pas être l'étiquette nue");
+  });
+
+  check("chaque commande porte un intervalle et le drapeau d'entrée", () => {
+    // Un instant sec ne déclenche rien : il faut « début-fin [enter] ».
+    const cmd = buildSendcmd("crop@fc0", [{ t: 0, x: 100 }, { t: 0.4, x: 160 }], 1.2);
+    const lines = cmd.trim().split("\n");
+    eq(lines.length, 2);
+    assert(/^0\.000-0\.400 \[enter\] crop@fc0 x 100;$/.test(lines[0]), lines[0]);
+    // La dernière commande tient jusqu'à la fin de la coupe.
+    assert(/^0\.400-1\.200 \[enter\] crop@fc0 x 160;$/.test(lines[1]), lines[1]);
+  });
+
+  check("une seule position produit quand même un intervalle valide", () => {
+    const cmd = buildSendcmd("crop@fc1", [{ t: 0, x: 42 }], 3).trim();
+    assert(/^0\.000-3\.000 \[enter\] crop@fc1 x 42;$/.test(cmd), cmd);
   });
 
   console.log("\n── Étage 5 · Metricool ──");

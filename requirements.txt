@@ -1,0 +1,4 @@
+# Recadrage 9:16 qui suit les visages (étage montage).
+# Facultatif : sans ces paquets, le rendu retombe sur le recadrage centré.
+opencv-python-headless>=4.8,<5
+numpy>=1.24

@@ -14,6 +14,7 @@ import { renderPlan, autoPlanFromMoment, reviewClip } from "@/lib/pipeline/clips
 import { createPlansFromInput } from "@/lib/pipeline/editPlan";
 import { prepareRush } from "@/lib/pipeline/orchestrator";
 import { queueClipPublications, processQueue } from "@/lib/metricool/publish";
+import { deliverClip } from "@/lib/delivery/drive";
 import { generateTestRush } from "@/lib/render/ffmpeg";
 import { ensureStorage, storagePath, saveUpload } from "@/lib/storage";
 import type { MetricoolNetwork } from "@/lib/metricool/client";
@@ -246,6 +247,25 @@ export async function schedulePublicationAction(formData: FormData) {
   });
   revalidatePath("/publishing");
   revalidatePath("/review");
+}
+
+export async function deliverClipAction(formData: FormData) {
+  const clipId = String(formData.get("clipId"));
+  try {
+    await deliverClip(clipId);
+  } catch (err) {
+    // L'échec est journalisé et porté par la livraison : l'interface le lit.
+    await prisma.pipelineEvent.create({
+      data: {
+        stage: "deliver",
+        entity: `clip:${clipId}`,
+        level: "error",
+        message: (err as Error).message,
+      },
+    });
+  }
+  revalidatePath(`/clips/${clipId}`);
+  revalidatePath("/settings");
 }
 
 export async function processQueueAction() {

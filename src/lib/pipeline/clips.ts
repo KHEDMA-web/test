@@ -11,6 +11,8 @@ import { renderMultiCut, type FramingMode } from "../render/ffmpeg";
 import { publicUrlFor, storagePath, ensureStorage } from "../storage";
 import type { Segment } from "../transcription/types";
 import type { Clip, ClipStatus } from "@prisma/client";
+import { config } from "../config";
+import { deliverClip } from "../delivery/drive";
 
 export type PlanCut = { start: number; end: number; note?: string; zoom?: number };
 
@@ -206,8 +208,10 @@ export async function autoPlanFromMoment(momentId: string, hookId?: string): Pro
       hook: hook?.text ?? null,
       caption: hook?.text ?? null,
       cuts: [{ start: moment.startSec, end: moment.endSec, note: "moment détecté automatiquement" }] as never,
+      // Source filmée en paysage : on suit les visages plutôt que de
+      // recadrer au centre, où l'orateur sort du cadre dès qu'il bouge.
       framing:
-        moment.rush.width && moment.rush.height && moment.rush.width > moment.rush.height ? "fit-blur" : "cover",
+        moment.rush.width && moment.rush.height && moment.rush.width > moment.rush.height ? "face" : "cover",
       source: "AUTO",
       author: "Détection automatique",
       rationale: moment.rationale,
@@ -259,6 +263,21 @@ export async function reviewClip(args: {
       where: { id: clip.clientId },
       data: { clipsDelivered: { increment: 1 } },
     });
+  }
+
+  // Validé = livré : le fichier part dans le dossier synchronisé sans
+  // autre geste. Un échec de livraison ne doit pas annuler la validation.
+  if (args.decision === "APPROVED" && config.delivery.auto && config.delivery.dir) {
+    try {
+      await deliverClip(clip.id);
+    } catch (err) {
+      await logEvent({
+        stage: "deliver",
+        entity: `clip:${clip.id}`,
+        level: "warn",
+        message: `Clip validé mais non livré : ${(err as Error).message}`,
+      });
+    }
   }
 
   await logEvent({

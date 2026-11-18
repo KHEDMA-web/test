@@ -76,7 +76,7 @@ const clipSchema = z.object({
   caption: z.string().max(3000).optional().nullable(),
   hashtags: z.array(z.string()).max(30).optional(),
   cuts: z.array(cutSchema).min(1, "au moins une coupe est nécessaire"),
-  framing: z.enum(["cover", "fit-blur", "fit-bars"]).optional(),
+  framing: z.enum(["cover", "fit-blur", "fit-bars", "face"]).optional(),
   burnSubtitles: z.boolean().optional(),
   normalizeAudio: z.boolean().optional(),
   captionOverrides: z.array(overrideSchema).optional().nullable(),

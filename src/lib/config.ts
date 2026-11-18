@@ -18,6 +18,18 @@ export const config = {
   forceMock,
 
   storageDir: env("CLIPFLOW_STORAGE_DIR", "./storage"),
+
+  /** Remise des clips finis dans un dossier synchronisé (Drive, Dropbox…). */
+  delivery: {
+    dir: env("CLIPFLOW_DELIVERY_DIR"),
+    /** Livrer automatiquement dès qu'un clip est validé. */
+    auto: env("CLIPFLOW_AUTO_DELIVER", "1") === "1",
+    /** Si le dossier est aussi exposé en ligne, sa base d'URL. */
+    publicBase: env("CLIPFLOW_DELIVERY_PUBLIC_BASE"),
+  },
+
+  /** Jeton partagé exigé sur les écritures de l'API locale (serveur MCP). */
+  apiToken: env("CLIPFLOW_API_TOKEN"),
   publicBaseUrl: env("CLIPFLOW_PUBLIC_BASE_URL", "http://localhost:3000"),
 
   whop: {
@@ -104,6 +116,14 @@ export function integrationStatuses(): IntegrationStatus[] {
     pairs.filter(([, v]) => !v).map(([k]) => k);
 
   return [
+    {
+      key: "delivery",
+      label: "Livraison — dossier synchronisé (Drive)",
+      stage: "5 · Livraison",
+      mode: config.delivery.dir ? "live" : "mock",
+      missing: miss([["CLIPFLOW_DELIVERY_DIR", config.delivery.dir]]),
+      docs: "https://support.google.com/drive/answer/7329379",
+    },
     {
       key: "whop",
       label: "Whop — API (abonnements clients)",

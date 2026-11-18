@@ -4,15 +4,19 @@ Je vends du clipping sur Whop. Les clients paient, je récupère ou je vais
 chercher leur matière, **je monte avec Claude**, et Metricool publie.
 
 ```
-① Whop            ② Rush             ③ Montage              ④ Validation  ⑤ Metricool
-   les clients   →   transcription  →   brief → Claude →   →   ma relecture →  publication
-   qui paient        moments scorés     plan → FFmpeg                           programmée
+① Whop            ② Rush             ③ Montage            ④ Validation   ⑤ Remise
+   les clients   →   transcription  →   Claude décide,  →   ma relecture → dossier Drive
+   qui paient        moments scorés     FFmpeg exécute                     ou Metricool
 ```
 
 La plateforme ne décide pas du montage. Elle prépare tout ce qu'il faut pour
-décider (transcription horodatée, moments scorés, hooks candidats), met ça en
-forme de brief, puis **exécute le plan que Claude rend**. La décision
-éditoriale reste dans la conversation ; l'exécution est automatique.
+décider (transcription horodatée, moments scorés, hooks candidats), puis
+**exécute le plan que Claude rend**. La décision éditoriale reste dans la
+conversation ; l'exécution est automatique.
+
+**Claude Desktop est branché directement dessus** par un serveur MCP : il lit
+le travail du jour, ouvre les rushes, pose ses montages et dépose les clips
+finis dans le dossier Drive. Rien à copier-coller.
 
 ---
 
@@ -36,9 +40,76 @@ npm run build
 
 ---
 
+## Brancher Claude Desktop (serveur MCP)
+
+C'est le chemin principal. Claude parle à l'atelier, il ne reçoit plus un
+brief collé à la main.
+
+1. Laisser l'atelier tourner : `npm run dev`.
+2. Claude Desktop → **Réglages** → **Développeur** → **Modifier la
+   configuration**, ce qui ouvre `claude_desktop_config.json`.
+3. Y coller (la page **Réglages** de l'atelier affiche ce bloc avec le bon
+   chemin absolu et un bouton pour le copier) :
+
+```json
+{
+  "mcpServers": {
+    "clipflow": {
+      "command": "node",
+      "args": ["/chemin/absolu/vers/clipflow/mcp/clipflow-server.mjs"],
+      "env": { "CLIPFLOW_URL": "http://localhost:3000" }
+    }
+  }
+}
+```
+
+4. Redémarrer Claude Desktop. Dans une conversation : « qu'est-ce que j'ai à
+   monter aujourd'hui ? », ou la commande `/monter`.
+
+**Les douze outils exposés**
+
+| Outil | Ce qu'il fait |
+|---|---|
+| `whats_next` | le travail du jour, classé par urgence client |
+| `get_rush` | un rush : brief client, moments scorés, hooks candidats |
+| `get_transcript` | la transcription, fenêtrable sur un rush long |
+| `get_brief` | le document complet en Markdown |
+| `submit_edit_plan` | poser un ou plusieurs montages, et lancer le rendu |
+| `render_plan` | relancer un rendu |
+| `list_clips` · `get_clip` | ce qui est produit, avec la QA |
+| `review_clip` | valider — ce qui déclenche la remise |
+| `deliver_clip` · `delivery_status` | déposer dans le Drive, vérifier le dossier |
+| `schedule_clip` | mettre en file Metricool |
+
+Le serveur ne touche pas la base : il appelle l'atelier en HTTP, donc une
+seule source de vérité et rien de plus à lancer. Si l'atelier est éteint,
+Claude reçoit un message qui le dit.
+
+Pour exposer l'API sur autre chose que la machine locale, renseigner
+`CLIPFLOW_API_TOKEN` des deux côtés : les écritures l'exigeront.
+
+## ⑤ La remise : le dossier Drive
+
+Un clip validé est déposé dans `CLIPFLOW_DELIVERY_DIR`, rangé
+`<client>/<AAAA-MM-JJ>/<titre>.mp4`, accompagné de :
+
+- la vignette (`.jpg`), pour le repérer dans Drive ;
+- une fiche lisible (`.txt`) : hook, légende, hashtags, réseaux, le détail
+  des coupes et l'intention du montage ;
+- une fiche complète (`.json`) pour tout outil qui automatiserait la suite.
+
+Le dossier étant synchronisé par Drive, le fichier part en ligne sans que la
+plateforme connaisse la moindre API de stockage. Si le dossier n'est pas
+monté, le message le dit explicitement plutôt que d'échouer en silence, et la
+validation du clip n'est pas annulée pour autant.
+
+Metricool reste disponible en parallèle (`schedule_clip`), pour qui veut la
+publication programmée plutôt que la remise par dossier.
+
 ## ③ Le montage avec Claude
 
-C'est la boucle centrale. Page `/rushes/<id>/montage` :
+Boucle manuelle, toujours disponible si Claude Desktop n'est pas branché.
+Page `/rushes/<id>/montage` :
 
 **1. Copier le brief.** Un document autonome (~15 k caractères pour un rush de
 4 minutes) qui contient le brief du client, ses consignes de hook, ce qu'il
@@ -67,6 +138,32 @@ fond :
 recollage **dans l'ordre donné par le plan** (deux passages peuvent être
 inversés si le montage le demande), passage en 1080×1920, zoom facultatif par
 coupe, sous-titres incrustés, hook en overlay, audio normalisé à −14 LUFS.
+
+### Le recadrage qui suit les visages
+
+`"framing": "face"` : le cadre vertical suit l'orateur au lieu de rester figé
+au centre. Sur une source 16:9, c'est la différence entre un clip regardable
+et un clip où la personne sort du champ dès qu'elle bouge.
+
+Comment : un script Python (OpenCV, détecteur DNN res10) échantillonne la
+coupe à 5 images par seconde, choisit le visage dominant — ou cadre le groupe
+quand tous les visages tiennent dans la fenêtre — lisse la trajectoire avec
+une zone morte contre le tremblement et un rattrapage adaptatif contre le
+retard, puis FFmpeg applique les positions avec `sendcmd`.
+
+Installation (facultative) :
+
+```bash
+./scripts/setup-face-tracking.sh
+```
+
+Sans ces dépendances, le rendu retombe sur le recadrage centré et le dit dans
+le journal : la plateforme fonctionne sans.
+
+Deux pièges rencontrés, pour qui toucherait au graphe FFmpeg : une commande
+`sendcmd` doit viser `crop@étiquette` (l'étiquette nue est ignorée en
+silence), et chaque commande veut un intervalle `début-fin [enter]`, pas un
+instant sec. Deux tests gardent ces deux points.
 
 Le point technique qui compte : **les sous-titres sont reprojetés sur la
 timeline montée**. Un mot prononcé à 2:31 dans le rush et gardé dans la
@@ -216,6 +313,36 @@ pour ça.
 
 ---
 
+## Les outils open source du même domaine
+
+Vérifié repo par repo, fichier `LICENSE` à l'appui, avant de reprendre quoi
+que ce soit. Les licences ne sont pas celles qu'on lit dans les comparatifs.
+
+| Projet | Licence réelle | Utilisable dans une activité payante ? |
+|---|---|---|
+| `mutonby/openshorts` | MIT (le dossier `cloud/` a sa propre licence commerciale) | oui, en gardant la mention de licence |
+| `JeremySNR/cutawan` | MIT | oui, en gardant la mention de licence |
+| `FujiwaraChoki/supoclip` | **SupoClip Noncommercial Source License** — pas AGPL | **non** sans accord écrit, usage interne compris |
+| `ColinGPT9/clips-studio` | AGPL-3.0 | seulement en publiant tout le code de la plateforme |
+
+Deux corrections par rapport à ce qui circule : SupoClip n'est pas sous
+AGPL mais sous une licence « source disponible » qui interdit l'usage
+commercial, ce qui est **plus** restrictif ; et c'est Clips Kitty qui est en
+AGPL-3.0.
+
+Ce qui a été repris : **rien**, au sens du code. Le seul élément qui manquait
+vraiment — le recadrage qui suit l'orateur — a été écrit ici (OpenCV +
+`sendcmd`), ce qui évite d'embarquer Docker, une dépendance Gemini ou un
+projet Electron entier pour une fonction de 200 lignes. Les 12 styles de
+sous-titres de Cutawan relèvent du même raisonnement : c'est de la feuille de
+style ASS, pas de la technique.
+
+Ce qui resterait à prendre ailleurs, si le besoin se présente : la détection
+du **locuteur actif** (qui parle, pas seulement qui est à l'image). Cutawan
+l'implémente avec un modèle LR-ASD en ONNX, sous MIT. C'est le seul morceau
+qui demanderait un vrai travail d'intégration, et il n'a de sens que sur des
+plateaux à plusieurs personnes.
+
 ## Limites connues
 
 - **Stockage local.** Les médias vivent dans `./storage`. Metricool exige une
@@ -234,3 +361,10 @@ pour ça.
 - **Chemins REST Whop.** La doc publique passe par le SDK sans donner tous les
   chemins HTTP ; ils sont centralisés dans `WHOP_PATHS` pour être corrigés en
   un seul endroit.
+- **Le suivi de visage demande Python et OpenCV**, et ne sait pas qui parle :
+  il suit le visage dominant. Sur un plateau à deux où l'un parle pendant que
+  l'autre écoute, le cadre peut rester sur le mauvais. La vraie réponse est
+  la détection de locuteur actif (audio + vidéo), qui n'est pas implémentée.
+- **L'API locale est ouverte par défaut.** Tant que `CLIPFLOW_API_TOKEN` est
+  vide, toute requête vers `localhost:3000` peut écrire. Acceptable sur un
+  poste de travail, à ne pas exposer tel quel.

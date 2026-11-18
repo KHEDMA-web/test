@@ -158,7 +158,7 @@ export async function buildEditBrief(rushId: string, opts: BriefOptions = {}): P
               { start: 91.3, end: 118.7, note: "la question et le début de la réponse" },
               { start: 134.2, end: 151.1, note: "la chute, recollée direct", zoom: 1.08 },
             ],
-            framing: "cover",
+            framing: "face",
             burnSubtitles: true,
             captionOverrides: [],
             rationale: "Pourquoi ce montage tient : ce qu'on garde, ce qu'on coupe, et pourquoi.",
@@ -179,7 +179,10 @@ export async function buildEditBrief(rushId: string, opts: BriefOptions = {}): P
   L.push("3. **Plusieurs coupes par clip sont encouragées** : retirer une digression, un « euh », une phrase qui retombe. Les coupes sont recollées dans l'ordre où tu les donnes — tu peux donc inverser deux passages si ça sert le montage.");
   L.push("4. **Ne coupe pas au milieu d'un mot.** Appuie-toi sur les bornes de segments, quitte à prendre 0,2 s de marge.");
   L.push("5. **Le hook fait 58 caractères maximum**, sans emoji ni majuscules criées, et doit être tenu par ce qui est réellement dit dans le clip.");
-  L.push("6. `framing` : `cover` (recadrage centré, par défaut), `fit-blur` (plan large conservé, fond flou) si l'image porte une information en périphérie, `fit-bars` sinon.");
+  L.push(
+    "6. `framing` : `face` suit les visages et garde l'orateur au centre — à préférer dès que la source est filmée en 16:9 avec des gens à l'image. " +
+      "`cover` recadre au centre sans rien suivre, `fit-blur` garde le plan large sur fond flou quand l'image porte une information en périphérie, `fit-bars` ajoute des bandes.",
+  );
   L.push("7. `zoom` est facultatif, entre 1.0 et 1.5, pour resserrer sur une coupe précise.");
   L.push("8. `captionOverrides` est facultatif : les sous-titres sont générés automatiquement depuis la transcription. Ne les force que pour corriger une erreur de transcription, en **temps de sortie** (0 = début du clip monté).");
   L.push("9. Chaque clip doit **tenir seul** : quelqu'un qui n'a pas vu le rush doit comprendre sans contexte.");

@@ -4,7 +4,7 @@ import path from "node:path";
 import { prisma } from "@/lib/db";
 import { PageHeader, StatusBadge, ScorePill, Empty } from "@/components/ui";
 import { SubmitButton } from "@/components/SubmitButton";
-import { reviewClipAction, schedulePublicationAction, renderPlanAction } from "@/app/actions";
+import { reviewClipAction, schedulePublicationAction, renderPlanAction, deliverClipAction } from "@/app/actions";
 import { formatDuration, formatTimecode, formatDateTime, formatCompact } from "@/lib/utils";
 import { STORAGE_ROOT } from "@/lib/storage";
 
@@ -31,6 +31,7 @@ export default async function ClipPage({ params }: { params: Promise<{ id: strin
       moment: true,
       reviews: { orderBy: { createdAt: "desc" } },
       publications: { orderBy: { scheduledAt: "asc" } },
+      deliveries: { orderBy: { createdAt: "desc" } },
     },
   });
   if (!clip) notFound();
@@ -142,6 +143,42 @@ export default async function ClipPage({ params }: { params: Promise<{ id: strin
               <p style={{ margin: "0.8rem 0 0", fontSize: "0.82rem", lineHeight: 1.6, color: "var(--text-muted)", fontStyle: "italic" }}>
                 {clip.editPlan.rationale}
               </p>
+            ) : null}
+          </section>
+
+          {/* Livraison */}
+          <section className="card" style={{ padding: "1.1rem 1.2rem" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
+              <div>
+                <h2 style={{ margin: "0 0 0.25rem", fontSize: "0.92rem", fontWeight: 600 }}>Livraison</h2>
+                <p style={{ margin: 0, fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                  Dépose la vidéo, sa vignette et sa fiche de légende dans le dossier synchronisé.
+                </p>
+              </div>
+              <form action={deliverClipAction}>
+                <input type="hidden" name="clipId" value={clip.id} />
+                <SubmitButton className={clip.deliveries.some((d) => d.status === "DELIVERED") ? "" : "btn-primary"} pendingLabel="Copie…">
+                  {clip.deliveries.some((d) => d.status === "DELIVERED") ? "Redéposer" : "Déposer dans le Drive"}
+                </SubmitButton>
+              </form>
+            </div>
+
+            {clip.deliveries.length ? (
+              <table className="data" style={{ marginTop: "0.9rem" }}>
+                <thead><tr><th>Fichier</th><th>Statut</th><th>Quand</th></tr></thead>
+                <tbody>
+                  {clip.deliveries.map((d) => (
+                    <tr key={d.id}>
+                      <td className="mono" style={{ fontSize: "0.74rem" }}>
+                        {d.filePath}
+                        {d.error ? <div style={{ color: "#f87171", fontFamily: "var(--font-sans)" }}>{d.error}</div> : null}
+                      </td>
+                      <td><StatusBadge status={d.status} /></td>
+                      <td style={{ fontSize: "0.74rem", color: "var(--text-faint)" }}>{formatDateTime(d.deliveredAt ?? d.createdAt)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             ) : null}
           </section>
 

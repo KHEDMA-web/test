@@ -10,7 +10,8 @@ export type Stage =
   | "plan"
   | "render"
   | "review"
-  | "publish";
+  | "publish"
+  | "deliver";
 
 /** Journalise une étape du pipeline (table PipelineEvent) sans jamais faire échouer l'appelant. */
 export async function logEvent(args: {
