@@ -1,0 +1,605 @@
+// ClipFlow — du rush à la mise en ligne.
+// Flux : Whop (recrutement) → rush → transcription → moments/hooks
+//        → montage (auto + clipper) → review → Metricool (publication)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// ÉTAGE 1 — WHOP : recrutement et accès
+// ─────────────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN // opérateur de la plateforme
+  CREATOR // fournit les rushes
+  CLIPPER // monte les clips
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  role      Role     @default(CLIPPER)
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Identité Whop (OAuth ou webhook)
+  whopUserId   String? @unique
+  whopUsername String?
+
+  clipperProfile ClipperProfile?
+  applications   Application[]
+  memberships    WhopMembership[]
+  campaigns      Campaign[]       @relation("CampaignOwner")
+  clips          Clip[]
+  rushes         Rush[]
+  reviews        ClipReview[]
+}
+
+/// Profil et score d'un clipper — sert à « chercher les meilleures personnes ».
+model ClipperProfile {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tier           ClipperTier @default(ROOKIE)
+  /// Score global 0-100, recalculé à chaque clip publié.
+  score          Int         @default(0)
+  /// Détail du score (JSON : chaque composante et son poids).
+  scoreBreakdown Json?
+
+  // Statistiques de performance
+  clipsSubmitted    Int   @default(0)
+  clipsApproved     Int   @default(0)
+  clipsRejected     Int   @default(0)
+  clipsPublished    Int   @default(0)
+  totalViews        Int   @default(0)
+  avgViews          Int   @default(0)
+  /// Taux de validation en % (approuvés / soumis).
+  approvalRate      Float @default(0)
+  /// Respect des délais en %.
+  onTimeRate        Float @default(0)
+  /// Heures médianes entre attribution et soumission.
+  medianTurnaroundH Float @default(0)
+
+  // Compétences déclarées / observées
+  niches    String[] @default([])
+  languages String[] @default([])
+  tools     String[] @default([])
+  portfolio String[] @default([])
+
+  activeSince DateTime?
+  lastClipAt  DateTime?
+  blocked     Boolean   @default(false)
+  notes       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  assignments Assignment[]
+  payouts     Payout[]
+}
+
+enum ClipperTier {
+  ROOKIE
+  VERIFIED
+  PRO
+  ELITE
+}
+
+/// Candidature arrivée par Whop, scorée avant d'accorder l'accès.
+model Application {
+  id     String  @id @default(cuid())
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // Données issues de Whop
+  whopUserId       String?
+  whopMembershipId String? @unique
+  whopProductId    String?
+  email            String
+  displayName      String
+
+  status ApplicationStatus @default(PENDING)
+
+  // Éléments de dossier
+  portfolioUrls String[] @default([])
+  socialHandles Json?
+  followerCount Int?
+  pastClipViews Int?
+  editingTools  String[] @default([])
+  niches        String[] @default([])
+  languages     String[] @default([])
+  answers       Json?
+
+  /// Score de candidature 0-100 et son détail.
+  score           Int       @default(0)
+  scoreBreakdown  Json?
+  autoDecision    String?
+  reviewedById    String?
+  reviewedAt      DateTime?
+  rejectionReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, score])
+}
+
+enum ApplicationStatus {
+  PENDING
+  SHORTLISTED
+  ACCEPTED
+  REJECTED
+  WITHDRAWN
+}
+
+/// Miroir local d'un membership Whop (source de vérité de l'accès).
+model WhopMembership {
+  id     String  @id @default(cuid())
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  whopMembershipId String  @unique
+  whopUserId       String
+  whopProductId    String?
+  whopPlanId       String?
+  accountId        String?
+
+  status            String // active | trialing | past_due | canceled ...
+  valid             Boolean   @default(false)
+  cancelAtPeriodEnd Boolean   @default(false)
+  currentPeriodEnd  DateTime?
+  metadata          Json?
+
+  raw       Json?
+  syncedAt  DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([whopUserId])
+  @@index([valid])
+}
+
+/// Dédup des webhooks Whop (livraison at-least-once).
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  source      String // whop | metricool
+  externalId  String // en-tête webhook-id
+  eventType   String
+  payload     Json
+  processedAt DateTime?
+  error       String?
+  receivedAt  DateTime  @default(now())
+
+  @@unique([source, externalId])
+  @@index([eventType])
+}
+
+// ─────────────────────────────────────────────────────────────
+// CAMPAGNES — le brief qui relie creator, clippers et réseaux
+// ─────────────────────────────────────────────────────────────
+
+model Campaign {
+  id      String @id @default(cuid())
+  name    String
+  slug    String @unique
+  ownerId String
+  owner   User   @relation("CampaignOwner", fields: [ownerId], references: [id])
+
+  status CampaignStatus @default(ACTIVE)
+
+  brief           String?
+  /// Consignes de hook (ton, interdits, formats qui marchent).
+  hookGuidelines  String?
+  targetNetworks  String[] @default([])
+  /// Blog/marque Metricool de destination.
+  metricoolBlogId String?
+
+  // Contraintes de clip
+  minClipSeconds Int @default(15)
+  maxClipSeconds Int @default(75)
+  clipsPerRush   Int @default(8)
+
+  // Rémunération
+  cpmCents      Int @default(0)
+  flatRateCents Int @default(0)
+  budgetCents   Int @default(0)
+  spentCents    Int @default(0)
+
+  whopProductId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  rushes      Rush[]
+  clips       Clip[]
+  assignments Assignment[]
+  payouts     Payout[]
+}
+
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+/// Attribution d'un rush (ou d'un lot de moments) à un clipper.
+model Assignment {
+  id         String         @id @default(cuid())
+  campaignId String
+  campaign   Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  clipperId  String
+  clipper    ClipperProfile @relation(fields: [clipperId], references: [id], onDelete: Cascade)
+  rushId     String?
+  rush       Rush?          @relation(fields: [rushId], references: [id], onDelete: SetNull)
+
+  momentIds   String[]         @default([])
+  quota       Int              @default(1)
+  dueAt       DateTime?
+  status      AssignmentStatus @default(OPEN)
+  /// Score d'adéquation clipper↔rush au moment de l'attribution.
+  matchScore  Int              @default(0)
+  matchReason String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  submittedAt DateTime?
+
+  clips Clip[]
+
+  @@index([status])
+}
+
+enum AssignmentStatus {
+  OPEN
+  IN_PROGRESS
+  SUBMITTED
+  COMPLETED
+  EXPIRED
+}
+
+// ─────────────────────────────────────────────────────────────
+// ÉTAGE 2 — RUSH ET TRANSCRIPTION
+// ─────────────────────────────────────────────────────────────
+
+model Rush {
+  id         String    @id @default(cuid())
+  campaignId String?
+  campaign   Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  uploaderId String?
+  uploader   User?     @relation(fields: [uploaderId], references: [id], onDelete: SetNull)
+
+  title       String
+  description String?
+  /// Chemin local du fichier (storage) ou null si distant.
+  filePath    String?
+  sourceUrl   String?
+  mimeType    String?
+  sizeBytes   BigInt?
+
+  durationSec Float?
+  width       Int?
+  height      Int?
+  fps         Float?
+  hasAudio    Boolean @default(true)
+  language    String?
+
+  status             RushStatus       @default(UPLOADED)
+  transcriptStatus   TranscriptStatus @default(NONE)
+  transcriptProvider String?
+  detectionAt        DateTime?
+  error              String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  segments    TranscriptSegment[]
+  moments     Moment[]
+  clips       Clip[]
+  assignments Assignment[]
+
+  @@index([status])
+}
+
+enum RushStatus {
+  UPLOADED
+  PROBING
+  TRANSCRIBING
+  DETECTING
+  READY
+  FAILED
+}
+
+enum TranscriptStatus {
+  NONE
+  RUNNING
+  DONE
+  FAILED
+}
+
+model TranscriptSegment {
+  id     String @id @default(cuid())
+  rushId String
+  rush   Rush   @relation(fields: [rushId], references: [id], onDelete: Cascade)
+
+  idx        Int
+  startSec   Float
+  endSec     Float
+  text       String
+  speaker    String?
+  confidence Float?
+  /// Mots horodatés, pour les sous-titres karaoké.
+  words      Json?
+
+  @@unique([rushId, idx])
+  @@index([rushId, startSec])
+}
+
+// ─────────────────────────────────────────────────────────────
+// ÉTAGE 3 — MEILLEURS MOMENTS ET HOOKS
+// ─────────────────────────────────────────────────────────────
+
+model Moment {
+  id     String @id @default(cuid())
+  rushId String
+  rush   Rush   @relation(fields: [rushId], references: [id], onDelete: Cascade)
+
+  startSec       Float
+  endSec         Float
+  /// Score de clippabilité 0-100.
+  score          Int
+  /// Chaque composante du score avec sa valeur et son poids.
+  scoreBreakdown Json
+  /// Phrase qui explique pourquoi ce moment est bon.
+  rationale      String?
+  transcript     String
+  keywords       String[]     @default([])
+  /// Émotion dominante détectée.
+  emotion        String?
+  rank           Int          @default(0)
+  status         MomentStatus @default(CANDIDATE)
+  detector       String       @default("heuristic-v1")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  hooks Hook[]
+  clips Clip[]
+
+  @@index([rushId, score])
+  @@index([status])
+}
+
+enum MomentStatus {
+  CANDIDATE
+  SELECTED
+  DISCARDED
+  CLIPPED
+}
+
+model Hook {
+  id       String @id @default(cuid())
+  momentId String
+  moment   Moment @relation(fields: [momentId], references: [id], onDelete: Cascade)
+
+  text           String
+  /// Angle du hook : question, chiffre, contrarien, curiosity-gap...
+  style          String
+  /// Score de puissance 0-100.
+  score          Int
+  scoreBreakdown Json?
+  provider       String  @default("heuristic")
+  selected       Boolean @default(false)
+  variant        Int     @default(0)
+
+  createdAt DateTime @default(now())
+
+  clips Clip[]
+
+  @@index([momentId, score])
+}
+
+// ─────────────────────────────────────────────────────────────
+// ÉTAGE 4 — MONTAGE (auto + clipper)
+// ─────────────────────────────────────────────────────────────
+
+model Clip {
+  id           String      @id @default(cuid())
+  campaignId   String?
+  campaign     Campaign?   @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  rushId       String
+  rush         Rush        @relation(fields: [rushId], references: [id], onDelete: Cascade)
+  momentId     String?
+  moment       Moment?     @relation(fields: [momentId], references: [id], onDelete: SetNull)
+  hookId       String?
+  hook         Hook?       @relation(fields: [hookId], references: [id], onDelete: SetNull)
+  clipperId    String?
+  clipper      User?       @relation(fields: [clipperId], references: [id], onDelete: SetNull)
+  assignmentId String?
+  assignment   Assignment? @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+
+  title    String
+  caption  String?
+  hashtags String[] @default([])
+
+  /// AUTO = rendu FFmpeg de la plateforme, CLIPPER = version montée à la main.
+  origin     ClipOrigin @default(AUTO)
+  version    Int        @default(1)
+  /// Clip remplacé par cette version (chaîne de versions).
+  replacesId String?
+
+  filePath    String?
+  previewPath String?
+  publicUrl   String?
+  durationSec Float?
+  width       Int?
+  height      Int?
+  sizeBytes   BigInt?
+
+  startSec     Float?
+  endSec       Float?
+  /// Recette de rendu : crop, sous-titres, overlay hook, musique.
+  renderRecipe Json?
+  renderLog    String?
+
+  status   ClipStatus @default(DRAFT)
+  /// Score de qualité auto (lisibilité du hook, rythme, durée).
+  qaScore  Int?
+  qaIssues String[]   @default([])
+
+  views  Int @default(0)
+  likes  Int @default(0)
+  shares Int @default(0)
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  submittedAt DateTime?
+  approvedAt  DateTime?
+
+  reviews      ClipReview[]
+  publications Publication[]
+  payouts      Payout[]
+
+  @@index([status])
+  @@index([campaignId, status])
+}
+
+enum ClipOrigin {
+  AUTO
+  CLIPPER
+  HYBRID
+}
+
+enum ClipStatus {
+  DRAFT // brouillon auto généré
+  RENDERING
+  READY // rendu disponible
+  SUBMITTED // soumis par le clipper
+  CHANGES_REQUESTED
+  APPROVED
+  REJECTED
+  SCHEDULED
+  PUBLISHED
+  FAILED
+}
+
+model ClipReview {
+  id         String  @id @default(cuid())
+  clipId     String
+  clip       Clip    @relation(fields: [clipId], references: [id], onDelete: Cascade)
+  reviewerId String?
+  reviewer   User?   @relation(fields: [reviewerId], references: [id], onDelete: SetNull)
+
+  decision ReviewDecision
+  comment  String?
+  /// Notes détaillées : hook, rythme, lisibilité, respect du brief.
+  ratings  Json?
+
+  createdAt DateTime @default(now())
+}
+
+enum ReviewDecision {
+  APPROVED
+  REJECTED
+  CHANGES_REQUESTED
+}
+
+// ─────────────────────────────────────────────────────────────
+// ÉTAGE 5 — PUBLICATION VIA METRICOOL
+// ─────────────────────────────────────────────────────────────
+
+model Publication {
+  id     String @id @default(cuid())
+  clipId String
+  clip   Clip   @relation(fields: [clipId], references: [id], onDelete: Cascade)
+
+  network      String // instagram | tiktok | youtube | facebook | linkedin | twitter | pinterest | threads | bluesky
+  blogId       String
+  text         String
+  firstComment String?
+
+  /// Heure locale sans décalage (exigence Metricool) + fuseau IANA.
+  scheduledAtLocal String
+  timezone         String
+  scheduledAt      DateTime
+
+  autoPublish Boolean @default(true)
+  draft       Boolean @default(false)
+  /// Options spécifiques réseau (facebookData, tiktokData, ...).
+  networkData Json?
+
+  mediaUrl String?
+  mediaId  String?
+
+  status          PublicationStatus @default(QUEUED)
+  attempts        Int               @default(0)
+  lastError       String?
+  /// Id du post renvoyé par Metricool.
+  metricoolPostId String?
+  metricoolRaw    Json?
+  requestPayload  Json?
+
+  publishedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status, scheduledAt])
+  @@index([clipId])
+}
+
+enum PublicationStatus {
+  QUEUED
+  SCHEDULING
+  SCHEDULED
+  PUBLISHED
+  FAILED
+  CANCELED
+}
+
+model Payout {
+  id         String         @id @default(cuid())
+  campaignId String
+  campaign   Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  clipperId  String
+  clipper    ClipperProfile @relation(fields: [clipperId], references: [id], onDelete: Cascade)
+  clipId     String?
+  clip       Clip?          @relation(fields: [clipId], references: [id], onDelete: SetNull)
+
+  amountCents Int
+  basis       String // cpm | flat | bonus
+  views       Int       @default(0)
+  status      String    @default("pending") // pending | paid
+  paidAt      DateTime?
+  createdAt   DateTime  @default(now())
+}
+
+/// Journal du pipeline : chaque étage écrit ici, pour tracer le flux.
+model PipelineEvent {
+  id         String   @id @default(cuid())
+  stage      String // whop | ingest | transcribe | detect | hook | render | review | publish
+  entity     String // rush:xxx, clip:xxx ...
+  level      String   @default("info") // info | warn | error
+  message    String
+  data       Json?
+  durationMs Int?
+  createdAt  DateTime @default(now())
+
+  @@index([stage, createdAt])
+  @@index([entity])
+}
+
+/// Réglages runtime éditables depuis /settings (surchargent l'env).
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
