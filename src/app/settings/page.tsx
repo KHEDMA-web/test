@@ -45,16 +45,49 @@ export default async function SettingsPage() {
         description="Chaque étage bascule du mock au réel dès que ses clés sont renseignées dans l'environnement. Aucune autre modification n'est nécessaire : le code appelant est identique dans les deux modes."
       />
 
+      <div
+        className="card"
+        style={{ padding: "0.8rem 1rem", marginBottom: "1rem", borderColor: "#22c55e44", background: "#22c55e0d", fontSize: "0.84rem" }}
+      >
+        <strong style={{ color: "#4ade80" }}>Configuration zéro euro :</strong>{" "}
+        <span style={{ color: "var(--text-muted)" }}>
+          transcription en local (faster-whisper), hooks heuristiques, montage FFmpeg, livraison dans un
+          dossier Drive, et le MCP Metricool — gratuit sur leur plan Free — pour programmer depuis Claude
+          Desktop. Seule l'API REST de Metricool est payante, et elle est facultative.
+        </span>
+      </div>
+
       <section className="card" style={{ overflow: "hidden", marginBottom: "1.4rem" }}>
         <table className="data">
           <thead>
-            <tr><th>Étage</th><th>Intégration</th><th>Mode</th><th>Variables manquantes</th><th>Documentation</th></tr>
+            <tr><th>Étage</th><th>Intégration</th><th>Coût</th><th>Mode</th><th>Variables manquantes</th><th>Doc</th></tr>
           </thead>
           <tbody>
             {integrations.map((i) => (
               <tr key={i.key}>
                 <td style={{ fontSize: "0.78rem", color: "var(--text-muted)", whiteSpace: "nowrap" }}>{i.stage}</td>
-                <td style={{ fontWeight: 500 }}>{i.label}</td>
+                <td style={{ fontWeight: 500 }}>
+                  {i.label}
+                  {i.freePath ? (
+                    <div style={{ fontSize: "0.72rem", color: "var(--text-faint)", fontWeight: 400, maxWidth: "46ch" }}>
+                      {i.freePath}
+                    </div>
+                  ) : null}
+                </td>
+                <td>
+                  <span
+                    className="badge"
+                    style={
+                      i.cost === "gratuit"
+                        ? { color: "#4ade80", borderColor: "#22c55e44", background: "#22c55e14" }
+                        : i.cost === "commission"
+                          ? { color: "#22d3ee", borderColor: "#06b6d444", background: "#06b6d414" }
+                          : { color: "#f87171", borderColor: "#ef444444", background: "#ef444414" }
+                    }
+                  >
+                    {i.cost === "commission" ? "part sur ventes" : i.cost}
+                  </span>
+                </td>
                 <td>
                   <span
                     className="badge"

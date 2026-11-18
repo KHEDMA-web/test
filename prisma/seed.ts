@@ -6,6 +6,11 @@
  *  4. Un montage tel que Claude le rendrait — plusieurs coupes — exécuté
  *  5. Validation et mise en file Metricool
  */
+// Le seed doit tourner sur une machine neuve, sans modèle téléchargé ni
+// clé : il force le mode mock quel que soit le .env.
+process.env.CLIPFLOW_MOCK = "1";
+process.env.TRANSCRIPTION_PROVIDER = "mock";
+
 import { prisma } from "../src/lib/db";
 import { syncAllMemberships } from "../src/lib/whop/sync";
 import { prepareRush } from "../src/lib/pipeline/orchestrator";

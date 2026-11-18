@@ -108,6 +108,10 @@ export type IntegrationStatus = {
   mode: "live" | "mock";
   missing: string[];
   docs: string;
+  /** Ce que cette brique coûte réellement. */
+  cost: "gratuit" | "payant" | "commission";
+  /** Comment rester à zéro euro sur cette brique. */
+  freePath?: string;
 };
 
 /** Utilisé par /settings pour montrer l'état réel de chaque étage. */
@@ -123,6 +127,8 @@ export function integrationStatuses(): IntegrationStatus[] {
       mode: config.delivery.dir ? "live" : "mock",
       missing: miss([["CLIPFLOW_DELIVERY_DIR", config.delivery.dir]]),
       docs: "https://support.google.com/drive/answer/7329379",
+      cost: "gratuit",
+      freePath: "Un dossier local suffit. Drive offre 15 Go gratuits.",
     },
     {
       key: "whop",
@@ -131,6 +137,8 @@ export function integrationStatuses(): IntegrationStatus[] {
       mode: live.whop() ? "live" : "mock",
       missing: miss([["WHOP_API_KEY", config.whop.apiKey]]),
       docs: "https://docs.whop.com/developer/api/quickstart",
+      cost: "commission",
+      freePath: "L'API ne se facture pas : Whop prélève une part sur chaque vente.",
     },
     {
       key: "whop-webhook",
@@ -139,6 +147,7 @@ export function integrationStatuses(): IntegrationStatus[] {
       mode: live.whopWebhook() ? "live" : "mock",
       missing: miss([["WHOP_WEBHOOK_SECRET", config.whop.webhookSecret]]),
       docs: "https://docs.whop.com/developer/guides/webhooks",
+      cost: "gratuit",
     },
     {
       key: "whop-oauth",
@@ -150,6 +159,7 @@ export function integrationStatuses(): IntegrationStatus[] {
         ["WHOP_OAUTH_CLIENT_SECRET", config.whop.oauth.clientSecret],
       ]),
       docs: "https://docs.whop.com/developer/guides/oauth",
+      cost: "gratuit",
     },
     {
       key: "transcription",
@@ -165,6 +175,15 @@ export function integrationStatuses(): IntegrationStatus[] {
               ? ["TRANSCRIPTION_PROVIDER"]
               : [],
       docs: "https://platform.openai.com/docs/guides/speech-to-text",
+      // Seuls les providers en ligne se facturent ; le local et le mock
+      // ne coûtent que du temps de calcul.
+      cost: ["openai", "deepgram"].includes(config.transcription.provider) ? "payant" : "gratuit",
+      freePath:
+        config.transcription.provider === "local-whisper"
+          ? "faster-whisper tourne sur votre machine : zéro appel payant."
+          : config.transcription.provider === "mock"
+            ? "Faux transcript, pour essayer. Pour du vrai et gratuit : TRANSCRIPTION_PROVIDER=local-whisper."
+            : "Facturé à la minute. Alternative gratuite : TRANSCRIPTION_PROVIDER=local-whisper (./scripts/setup-local-transcription.sh).",
     },
     {
       key: "hooks",
@@ -173,6 +192,9 @@ export function integrationStatuses(): IntegrationStatus[] {
       mode: live.hooksLlm() ? "live" : "mock",
       missing: miss([["ANTHROPIC_API_KEY", config.hooks.anthropicKey]]),
       docs: "https://docs.claude.com/en/api/messages",
+      cost: live.hooksLlm() ? "payant" : "gratuit",
+      freePath:
+        "Facultatif. Les hooks heuristiques sont gratuits, et le vrai travail éditorial passe par Claude Desktop (abonnement, pas de crédits API).",
     },
     {
       key: "metricool",
@@ -185,6 +207,9 @@ export function integrationStatuses(): IntegrationStatus[] {
         ["METRICOOL_BLOG_ID", config.metricool.blogId],
       ]),
       docs: "https://help.metricool.com/basic-guide-for-api-integration-r97af",
+      cost: "payant",
+      freePath:
+        "L'API REST exige le plan Advanced. Le MCP Metricool, lui, marche sur le plan gratuit : branchez-le dans Claude Desktop à côté de ClipFlow.",
     },
   ];
 }

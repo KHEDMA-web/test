@@ -20,17 +20,83 @@ finis dans le dossier Drive. Rien à copier-coller.
 
 ---
 
+## Combien ça coûte : zéro euro
+
+Le flux complet tourne sans dépenser un centime. Voici ce que chaque brique
+coûte réellement, vérifié plutôt que supposé.
+
+| Brique | Coût | Le chemin gratuit |
+|---|---|---|
+| Whop | **part sur les ventes** | L'API ne se facture pas. Whop prélève environ 2,7 % + 0,30 $ par vente, sans abonnement mensuel. Vous ne payez que quand vous encaissez. |
+| Transcription | **gratuit** | `faster-whisper` tourne sur votre machine. Modèle téléchargé une fois, puis hors ligne. |
+| Détection de moments, hooks | **gratuit** | Heuristiques locales, aucun appel. |
+| Montage, sous-titres, suivi de visage | **gratuit** | FFmpeg et OpenCV. |
+| Base de données | **gratuit** | PostgreSQL. |
+| Le travail éditorial de Claude | **compris dans votre abonnement** | Claude Desktop parle à l'atelier par MCP. Aucun crédit API consommé. |
+| Livraison | **gratuit** | Un dossier local, synchronisé par Drive (15 Go gratuits). |
+| Metricool — API REST | **payant** | Réservée aux plans Advanced et Custom. **Facultative.** |
+| Metricool — MCP | **gratuit** | Disponible sur le plan Free. C'est le chemin à prendre. |
+
+### Programmer ses publications sans payer
+
+Metricool dit noir sur blanc deux choses opposées :
+
+> « The API is available on Advanced and Custom plans. Free and Starter plans
+> do not include API access. »
+>
+> « Metricool MCP is available on any plan, including Free. »
+
+Donc : **n'utilisez pas l'intégration API REST de cet atelier**, branchez le
+MCP de Metricool à côté du nôtre dans Claude Desktop. Claude monte le clip
+avec ClipFlow, le dépose dans le Drive, puis le programme avec Metricool —
+deux serveurs MCP, une seule conversation.
+
+```json
+{
+  "mcpServers": {
+    "clipflow": {
+      "command": "node",
+      "args": ["/chemin/absolu/vers/clipflow/mcp/clipflow-server.mjs"]
+    },
+    "metricool": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://ai.metricool.com/mcp"]
+    }
+  }
+}
+```
+
+Les limites du plan Free de Metricool, à connaître avant de s'y engager :
+**1 marque**, **20 publications programmées par mois**, 30 jours
+d'historique de statistiques, et **ni LinkedIn ni X**. Au-delà, c'est
+l'abonnement payant ou la publication à la main depuis le Drive.
+
+Deux réserves honnêtes : leur documentation ne dit pas si la publication
+d'une **vidéo** par MCP exige une URL publique comme l'API REST l'exige — à
+vérifier en testant. Et un compte **Claude gratuit** ne peut utiliser qu'un
+seul connecteur MCP à la fois, ce qui empêcherait d'avoir ClipFlow et
+Metricool ensemble.
+
 ## Démarrage
 
 ```bash
 npm install
-cp .env.example .env          # CLIPFLOW_MOCK=1 : tout tourne sans clé
+cp .env.example .env
 npm run db:push
 npm run db:seed               # atelier déjà en activité, rush de test inclus
 npm run dev                   # http://localhost:3000
 ```
 
+Le seed tourne en mode mock : rien à installer pour voir la plateforme
+vivre. Pour transcrire de vrais rushes, gratuitement :
+
+```bash
+./scripts/setup-local-transcription.sh   # faster-whisper, une fois
+./scripts/setup-face-tracking.sh         # suivi de visage, facultatif
+```
+
 Prérequis : Node 22+, PostgreSQL 16+, **ffmpeg et ffprobe** dans le `PATH`.
+Pour la transcription locale et le suivi de visage : Python 3.10+.
 
 ```bash
 npm test          # 49 tests : qualification, plans, remappage, Metricool…
@@ -276,7 +342,7 @@ modification de code. L'état de chaque étage est visible dans **Réglages**.
 | ① Whop API | `WHOP_API_KEY` | 6 clients fictifs contrastés |
 | ① Webhook | `WHOP_WEBHOOK_SECRET` | l'endpoint refuse tout (503) |
 | ① OAuth | `WHOP_OAUTH_CLIENT_ID/SECRET` | profil de démonstration |
-| ② Transcription | `TRANSCRIPTION_PROVIDER` + clé | faux podcast français horodaté |
+| ② Transcription | `TRANSCRIPTION_PROVIDER=local-whisper` (gratuit) ou une clé | faux podcast français horodaté |
 | ② Hooks candidats | `ANTHROPIC_API_KEY` | générateur heuristique |
 | ⑤ Metricool | `METRICOOL_USER_TOKEN`, `_USER_ID`, `_BLOG_ID` | posts en mémoire |
 
