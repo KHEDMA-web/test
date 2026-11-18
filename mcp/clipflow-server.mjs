@@ -133,7 +133,9 @@ server.registerTool(
     title: "Le brief de montage",
     description:
       "Document complet en Markdown : contexte client, transcription, moments scorés, hooks candidats " +
-      "et format de réponse attendu. Utile pour tout avoir d'un coup sur un rush court.",
+      "et format de réponse attendu. L'étendue de la transcription s'ajuste seule à la longueur du " +
+      "rush : complète si elle tient, resserrée autour des moments repérés sinon. Dans ce cas, lis " +
+      "les passages manquants avec get_transcript plutôt que de demander l'épisode entier.",
     inputSchema: {
       rushId: z.string(),
       clips: z.number().int().min(1).max(12).optional().describe("Nombre de clips demandés"),

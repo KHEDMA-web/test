@@ -89,7 +89,18 @@ export default async function MontagePage({ params }: { params: Promise<{ id: st
           <span className="badge mono">{brief.momentCount} moments</span>
           <span className="badge mono">{rush.clipsTarget} clip(s) demandés</span>
           {rush.client ? <span className="badge">{rush.client.minClipSeconds}–{rush.client.maxClipSeconds} s</span> : null}
+          <span
+            className="badge"
+            style={
+              brief.transcriptMode === "full"
+                ? { color: "#4ade80", borderColor: "#22c55e44" }
+                : { color: "#fbbf24", borderColor: "#f59e0b44" }
+            }
+          >
+            transcription : {brief.transcriptMode === "full" ? "complète" : brief.transcriptMode === "around-moments" ? "resserrée" : "à la demande"}
+          </span>
         </div>
+        <p style={{ margin: "0.5rem 0 0", fontSize: "0.76rem", color: "var(--text-faint)" }}>{brief.transcriptNote}</p>
 
         <details style={{ marginTop: "0.9rem" }}>
           <summary style={{ cursor: "pointer", fontSize: "0.82rem", color: "var(--text-muted)" }}>

@@ -15,6 +15,18 @@ import { formatTimecode } from "../utils";
 
 export const PLAN_SCHEMA_VERSION = "clipflow-plan-1";
 
+/**
+ * Taille maximale visée pour un brief, en caractères (~12 000 jetons).
+ *
+ * Un rush d'une heure, c'est de l'ordre de 70 000 caractères de
+ * transcription : le pousser entier dans une conversation à chaque montage
+ * consomme une part sérieuse d'un quota d'abonnement, pour un gain nul —
+ * les trois quarts du texte sont hors des passages intéressants. Au-delà
+ * du budget, le brief se resserre autour des moments repérés, et Claude
+ * va chercher le reste à la demande avec `get_transcript`.
+ */
+export const BRIEF_CHAR_BUDGET = Number(process.env.CLIPFLOW_BRIEF_BUDGET ?? 45_000);
+
 export type BriefOptions = {
   /** Nombre de clips demandés dans la réponse. */
   clipCount?: number;
@@ -31,6 +43,10 @@ export type Brief = {
   segmentCount: number;
   momentCount: number;
   approxChars: number;
+  /** Étendue de transcription réellement incluse. */
+  transcriptMode: "full" | "around-moments" | "none";
+  /** Pourquoi cette étendue, pour que le choix soit lisible. */
+  transcriptNote: string;
 };
 
 function fmtRange(start: number, end: number): string {
@@ -49,8 +65,38 @@ export async function buildEditBrief(rushId: string, opts: BriefOptions = {}): P
 
   const client = rush.client;
   const clipCount = opts.clipCount ?? rush.clipsTarget ?? 3;
-  const transcriptMode = opts.transcript ?? "full";
   const margin = opts.margin ?? 12;
+
+  // Choix de l'étendue : demandée explicitement, sinon ajustée au budget.
+  const fullChars = rush.segments.reduce((sum, s) => sum + s.text.length + 26, 0);
+  const windowed = rush.segments.filter((s) =>
+    rush.moments.some((m) => s.endSec > m.startSec - margin && s.startSec < m.endSec + margin),
+  );
+  const windowedChars = windowed.reduce((sum, s) => sum + s.text.length + 26, 0);
+  // Ce que pèsent les moments et le contexte client, avant transcription.
+  const overhead = 4_000 + rush.moments.reduce((sum, m) => sum + m.transcript.length + 400, 0);
+
+  let transcriptMode: "full" | "around-moments" | "none";
+  let transcriptNote: string;
+
+  if (opts.transcript) {
+    transcriptMode = opts.transcript;
+    transcriptNote = "Étendue imposée par l'appel.";
+  } else if (overhead + fullChars <= BRIEF_CHAR_BUDGET) {
+    transcriptMode = "full";
+    transcriptNote = `Transcription complète (${(fullChars / 1000).toFixed(1)} k caractères), le rush tient dans le budget.`;
+  } else if (overhead + windowedChars <= BRIEF_CHAR_BUDGET) {
+    transcriptMode = "around-moments";
+    transcriptNote =
+      `Rush long : transcription resserrée autour des moments repérés ` +
+      `(${(windowedChars / 1000).toFixed(1)} k au lieu de ${(fullChars / 1000).toFixed(1)} k caractères). ` +
+      `Le reste reste accessible à la demande.`;
+  } else {
+    transcriptMode = "none";
+    transcriptNote =
+      `Rush trop long pour embarquer la transcription (${(fullChars / 1000).toFixed(1)} k caractères). ` +
+      `Les moments repérés sont cités avec leur texte ; lisez le reste par tranches.`;
+  }
   const minSec = client?.minClipSeconds ?? 18;
   const maxSec = client?.maxClipSeconds ?? 60;
 
@@ -118,17 +164,29 @@ export async function buildEditBrief(rushId: string, opts: BriefOptions = {}): P
   }
 
   // ── Transcription ─────────────────────────────────────────
-  if (transcriptMode !== "none" && rush.segments.length) {
-    const keep =
-      transcriptMode === "full"
-        ? rush.segments
-        : rush.segments.filter((s) =>
-            rush.moments.some((m) => s.endSec > m.startSec - margin && s.startSec < m.endSec + margin),
-          );
+  if (transcriptMode === "none") {
+    L.push("## Transcription");
+    L.push("");
+    L.push(
+      `Ce rush dure ${formatTimecode(rush.durationSec ?? 0)} : sa transcription complète n'est pas incluse ici. ` +
+        "Le texte de chaque moment repéré est cité plus haut. Pour lire un autre passage, demande la " +
+        "transcription d'une tranche précise (outil `get_transcript`, bornes en secondes) plutôt que " +
+        "l'épisode entier.",
+    );
+    L.push("");
+  } else if (rush.segments.length) {
+    const keep = transcriptMode === "full" ? rush.segments : windowed;
 
-    L.push(`## Transcription horodatée${transcriptMode === "around-moments" ? " (autour des moments repérés)" : ""}`);
+    L.push(`## Transcription horodatée${transcriptMode === "around-moments" ? " (resserrée autour des moments repérés)" : ""}`);
     L.push("");
     L.push("Format : `[début → fin] locuteur : texte`. Les timecodes sont en secondes depuis le début du rush.");
+    if (transcriptMode === "around-moments") {
+      L.push("");
+      L.push(
+        "Les passages hors moments repérés sont absents pour tenir dans une conversation. " +
+          "S'il te manque du contexte autour d'une coupe, demande la tranche correspondante.",
+      );
+    }
     L.push("");
     L.push("```");
     for (const s of keep) {
@@ -199,5 +257,7 @@ export async function buildEditBrief(rushId: string, opts: BriefOptions = {}): P
     segmentCount: rush.segments.length,
     momentCount: rush.moments.length,
     approxChars: markdown.length,
+    transcriptMode,
+    transcriptNote,
   };
 }

@@ -9,6 +9,7 @@ import { qualifyClient, productionPriority, MIN_VIABLE_PRICE_PER_CLIP_CENTS } fr
 import { extractJsonBlock, parsePlanInput, validateClip } from "../src/lib/pipeline/editPlan";
 import { remapSegmentsForCuts } from "../src/lib/render/ass";
 import { buildSendcmd } from "../src/lib/render/faceTrack";
+import { BRIEF_CHAR_BUDGET } from "../src/lib/pipeline/brief";
 import { verifyWhopWebhook, signPayload, WebhookVerificationError } from "../src/lib/whop/webhook";
 import { detectMoments } from "../src/lib/pipeline/moments";
 import { generateHeuristicHooks, scoreHook } from "../src/lib/pipeline/hooks";
@@ -328,6 +329,15 @@ async function main() {
     const topics = extractTopics("Tu ne construis pas une entreprise sur une émotion, mais sur des contraintes.");
     assert(topics.length > 0, "aucun sujet extrait");
     assert(!topics.includes("construis"), `forme verbale retenue : ${topics.join(", ")}`);
+  });
+
+  console.log("\n── Étage 3 · taille du brief ──");
+
+  check("le budget de brief tient dans une conversation", () => {
+    // 45 k caractères ≈ 12 k jetons : au-delà, un rush d'une heure mange
+    // une part sérieuse d'un quota d'abonnement à chaque montage.
+    assert(BRIEF_CHAR_BUDGET >= 10_000, "budget trop bas pour être utile");
+    assert(BRIEF_CHAR_BUDGET <= 120_000, "budget trop haut : le rush long passerait entier");
   });
 
   console.log("\n── Étage 4 · lecture du plan de Claude ──");

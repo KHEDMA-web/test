@@ -71,11 +71,33 @@ Les limites du plan Free de Metricool, à connaître avant de s'y engager :
 d'historique de statistiques, et **ni LinkedIn ni X**. Au-delà, c'est
 l'abonnement payant ou la publication à la main depuis le Drive.
 
-Deux réserves honnêtes : leur documentation ne dit pas si la publication
-d'une **vidéo** par MCP exige une URL publique comme l'API REST l'exige — à
-vérifier en testant. Et un compte **Claude gratuit** ne peut utiliser qu'un
-seul connecteur MCP à la fois, ce qui empêcherait d'avoir ClipFlow et
-Metricool ensemble.
+Côté Claude, il faut un abonnement : le plan gratuit n'autorise qu'un seul
+connecteur à la fois, donc pas ClipFlow **et** Metricool. Pro, Max, Team et
+Enterprise n'ont pas ce plafond.
+
+Une réserve honnête : la documentation de Metricool ne dit pas si la
+publication d'une **vidéo** par MCP exige une URL publique comme l'API REST
+l'exige. À vérifier en testant.
+
+### Tenir dans un quota d'abonnement
+
+Un rush d'une heure, c'est de l'ordre de 70 000 caractères de transcription.
+Le pousser entier à chaque montage consommerait une part sérieuse d'un quota
+mensuel, pour un gain nul : les trois quarts du texte sont hors des passages
+intéressants.
+
+Le brief s'ajuste donc tout seul à la longueur du rush, sous un budget de
+45 000 caractères (`CLIPFLOW_BRIEF_BUDGET`) :
+
+| Rush | Étendue retenue | Brief produit |
+|---|---|---|
+| 4 min | transcription complète | 16 k caractères |
+| 25 min | transcription complète | 44 k |
+| 60 min | resserrée autour des moments | 28 k, au lieu de 55 k |
+
+Au-delà, la transcription sort du brief et Claude lit les passages qui lui
+manquent par tranches avec `get_transcript`. L'interface affiche à chaque
+fois l'étendue retenue et pourquoi.
 
 ## Démarrage
 
