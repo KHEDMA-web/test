@@ -12,7 +12,9 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
     "pipeline": "tsx scripts/pipeline.ts",
-    "test": "tsx scripts/test.ts"
+    "test": "tsx scripts/test.ts",
+    "porter": "./scripts/porter.sh",
+    "porter:verifier": "tsx scripts/equivalence-portage.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.10.0",

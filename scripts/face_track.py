@@ -26,6 +26,9 @@ import sys
 try:
     import cv2
     import numpy as np
+
+    # Quatre cœurs au plus : OpenCV les prend tous par défaut.
+    cv2.setNumThreads(4)
 except ImportError as exc:  # pragma: no cover - dépend de l'environnement
     print(json.dumps({"ok": False, "error": f"dépendance manquante : {exc}. Installez opencv-python-headless."}))
     sys.exit(0)

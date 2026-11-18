@@ -287,6 +287,10 @@ export async function renderMultiCut(args: MultiCutRender): Promise<RenderResult
     const ffArgs = [
       "-hide_banner",
       "-y",
+      // Quatre cœurs au plus, jamais la carte graphique : un rendu ne doit
+      // pas confisquer la machine pendant qu'on travaille à côté.
+      "-threads", "4",
+      "-filter_threads", "4",
       "-i", args.source,
       "-filter_complex", graph.join(";"),
       "-map", "[vout]",
@@ -313,6 +317,7 @@ export async function renderMultiCut(args: MultiCutRender): Promise<RenderResult
         "ffmpeg",
         [
           "-hide_banner", "-y",
+          "-threads", "2",
           "-ss", Math.min(1.2, totalDuration / 2).toFixed(2),
           "-i", args.outputPath,
           "-frames:v", "1",
