@@ -1,0 +1,582 @@
+// ClipFlow — mon atelier de clipping.
+//
+// Le flux, tel qu'il tourne réellement :
+//   ① Whop      je vends un abonnement de clipping ; les clients arrivent ici
+//   ② Rush      ils me donnent leur matière, ou je vais la chercher
+//   ③ Analyse   transcription, moments scorés, hooks candidats
+//   ④ Montage   je monte avec Claude dans le chat : il me rend un plan de
+//               montage, la plateforme l'exécute avec FFmpeg
+//   ⑤ Metricool publication programmée
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// ÉTAGE 1 — WHOP : les clients qui paient pour du clipping
+// ─────────────────────────────────────────────────────────────
+
+enum Role {
+  OWNER // moi : je monte et je publie
+  CLIENT // celui qui paie l'abonnement
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  role      Role     @default(CLIENT)
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  whopUserId   String? @unique
+  whopUsername String?
+
+  client      Client?
+  memberships WhopMembership[]
+  rushes      Rush[]
+  reviews     ClipReview[]
+}
+
+enum ClientStatus {
+  PROSPECT // candidature arrivée, pas encore qualifiée
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  PAUSED
+  CHURNED
+  DECLINED // je n'ai pas pris le client
+}
+
+/// Qui fournit la matière première.
+enum RushSourcing {
+  CLIENT_PROVIDED // le client dépose ses rushes
+  SELF_SOURCED // je vais chercher sa matière (chaîne, podcast, lives)
+  MIXED
+}
+
+/// Un client payant. Porte aussi son brief : c'est lui qui paramètre
+/// la détection et la publication de ses clips.
+model Client {
+  id     String  @id @default(cuid())
+  userId String? @unique
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  name    String
+  email   String
+  company String?
+  handle  String? // @ principal du client
+
+  // Abonnement Whop
+  whopMembershipId String?      @unique
+  whopUserId       String?
+  whopProductId    String?
+  whopPlanId       String?
+  planName         String?
+  status           ClientStatus @default(PROSPECT)
+  valid            Boolean      @default(false)
+  mrrCents         Int          @default(0)
+  currentPeriodEnd DateTime?
+  startedAt        DateTime?
+  churnedAt        DateTime?
+
+  // Engagement de service
+  clipsPerMonth   Int          @default(8)
+  clipsDelivered  Int          @default(0)
+  turnaroundHours Int          @default(48)
+  sourcing        RushSourcing @default(CLIENT_PROVIDED)
+  sourceChannels  String[]     @default([]) // chaînes/podcasts où je vais chercher la matière
+
+  // Brief : ce qui pilote la détection et le montage
+  brief          String?
+  hookGuidelines String?
+  brandVoice     String?
+  avoid          String? // ce qu'il ne veut pas voir
+  niches         String[] @default([])
+  languages      String[] @default(["fr"])
+  targetNetworks String[] @default([])
+  minClipSeconds Int      @default(18)
+  maxClipSeconds Int      @default(60)
+  clipsPerRush   Int      @default(6)
+
+  /// Marque Metricool de destination.
+  metricoolBlogId String?
+
+  // Qualification du prospect
+  score          Int       @default(0)
+  scoreBreakdown Json?
+  decision       String?
+  decisionNote   String?
+  qualifiedAt    DateTime?
+
+  // Matière déclarée à l'inscription
+  backCatalogHours Float?
+  audienceSize     Int?
+  pastClipViews    Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  rushes       Rush[]
+  clips        Clip[]
+  editPlans    EditPlan[]
+  publications Publication[]
+  deliveries   Delivery[]
+
+  @@index([status, score])
+}
+
+/// Miroir local d'un abonnement Whop : source de vérité du paiement.
+model WhopMembership {
+  id     String  @id @default(cuid())
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  whopMembershipId String  @unique
+  whopUserId       String
+  whopProductId    String?
+  whopPlanId       String?
+  accountId        String?
+
+  status            String
+  valid             Boolean   @default(false)
+  cancelAtPeriodEnd Boolean   @default(false)
+  currentPeriodEnd  DateTime?
+  metadata          Json?
+
+  raw       Json?
+  syncedAt  DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([whopUserId])
+  @@index([valid])
+}
+
+/// Dédup des webhooks (livraison at-least-once).
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  source      String
+  externalId  String
+  eventType   String
+  payload     Json
+  processedAt DateTime?
+  error       String?
+  receivedAt  DateTime  @default(now())
+
+  @@unique([source, externalId])
+  @@index([eventType])
+}
+
+// ─────────────────────────────────────────────────────────────
+// ÉTAGE 2 — LE RUSH
+// ─────────────────────────────────────────────────────────────
+
+enum RushOrigin {
+  CLIENT_UPLOAD // déposé par le client
+  SOURCED // trouvé par moi
+}
+
+model Rush {
+  id         String  @id @default(cuid())
+  clientId   String?
+  client     Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  uploaderId String?
+  uploader   User?   @relation(fields: [uploaderId], references: [id], onDelete: SetNull)
+
+  title       String
+  description String?
+  origin      RushOrigin @default(CLIENT_UPLOAD)
+  /// D'où vient la matière quand je l'ai trouvée moi-même.
+  sourceNote  String?
+
+  filePath  String?
+  sourceUrl String?
+  mimeType  String?
+  sizeBytes BigInt?
+
+  durationSec Float?
+  width       Int?
+  height      Int?
+  fps         Float?
+  hasAudio    Boolean @default(true)
+  language    String?
+
+  /// Nombre de clips attendus sur ce rush, et échéance de livraison.
+  clipsTarget Int       @default(3)
+  dueAt       DateTime?
+
+  status             RushStatus       @default(UPLOADED)
+  transcriptStatus   TranscriptStatus @default(NONE)
+  transcriptProvider String?
+  detectionAt        DateTime?
+  error              String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  segments  TranscriptSegment[]
+  moments   Moment[]
+  clips     Clip[]
+  editPlans EditPlan[]
+
+  @@index([status])
+}
+
+enum RushStatus {
+  UPLOADED
+  PROBING
+  TRANSCRIBING
+  DETECTING
+  READY
+  FAILED
+}
+
+enum TranscriptStatus {
+  NONE
+  RUNNING
+  DONE
+  FAILED
+}
+
+model TranscriptSegment {
+  id     String @id @default(cuid())
+  rushId String
+  rush   Rush   @relation(fields: [rushId], references: [id], onDelete: Cascade)
+
+  idx        Int
+  startSec   Float
+  endSec     Float
+  text       String
+  speaker    String?
+  confidence Float?
+  words      Json?
+
+  @@unique([rushId, idx])
+  @@index([rushId, startSec])
+}
+
+// ─────────────────────────────────────────────────────────────
+// ÉTAGE 3 — MOMENTS ET HOOKS (préparation du brief)
+// ─────────────────────────────────────────────────────────────
+
+model Moment {
+  id     String @id @default(cuid())
+  rushId String
+  rush   Rush   @relation(fields: [rushId], references: [id], onDelete: Cascade)
+
+  startSec       Float
+  endSec         Float
+  score          Int
+  scoreBreakdown Json
+  rationale      String?
+  transcript     String
+  keywords       String[]     @default([])
+  emotion        String?
+  rank           Int          @default(0)
+  status         MomentStatus @default(CANDIDATE)
+  detector       String       @default("heuristic-v1")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  hooks     Hook[]
+  clips     Clip[]
+  editPlans EditPlan[]
+
+  @@index([rushId, score])
+  @@index([status])
+}
+
+enum MomentStatus {
+  CANDIDATE
+  SELECTED
+  DISCARDED
+  CLIPPED
+}
+
+model Hook {
+  id       String @id @default(cuid())
+  momentId String
+  moment   Moment @relation(fields: [momentId], references: [id], onDelete: Cascade)
+
+  text           String
+  style          String
+  score          Int
+  scoreBreakdown Json?
+  provider       String  @default("heuristic")
+  selected       Boolean @default(false)
+  variant        Int     @default(0)
+
+  createdAt DateTime @default(now())
+
+  clips Clip[]
+
+  @@index([momentId, score])
+}
+
+// ─────────────────────────────────────────────────────────────
+// ÉTAGE 4 — LE MONTAGE : plan rendu par Claude, exécuté par FFmpeg
+// ─────────────────────────────────────────────────────────────
+
+enum PlanSource {
+  CLAUDE_CHAT // collé depuis une conversation avec Claude
+  CLAUDE_CODE // posté sur /api/edit-plans
+  MANUAL // écrit à la main dans l'interface
+  AUTO // proposition de la plateforme (moment + meilleur hook)
+}
+
+enum PlanStatus {
+  DRAFT
+  RENDERING
+  RENDERED
+  FAILED
+}
+
+/// Un plan de montage : la décision éditoriale, séparée de son exécution.
+/// C'est l'objet que Claude produit et que la plateforme sait exécuter.
+model EditPlan {
+  id       String  @id @default(cuid())
+  rushId   String
+  rush     Rush    @relation(fields: [rushId], references: [id], onDelete: Cascade)
+  clientId String?
+  client   Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  momentId String?
+  moment   Moment? @relation(fields: [momentId], references: [id], onDelete: SetNull)
+
+  title    String
+  /// Texte affiché sur la première seconde.
+  hook     String?
+  /// Légende du post (reprise par défaut à la publication).
+  caption  String?
+  hashtags String[] @default([])
+
+  /// Les coupes, dans l'ordre de montage : [{ startSec, endSec, note?, zoom? }]
+  cuts             Json
+  /// Sous-titres imposés par Claude, en temps de SORTIE : [{ startSec, endSec, text }]
+  captionOverrides Json?
+
+  framing        String  @default("cover") // cover | fit-blur | fit-bars
+  burnSubtitles  Boolean @default(true)
+  normalizeAudio Boolean @default(true)
+  /// Note d'intention : pourquoi ces coupes, ce hook.
+  rationale      String?
+  /// Indication de musique ou de son, pour la passe manuelle éventuelle.
+  musicNote      String?
+
+  source   PlanSource @default(CLAUDE_CHAT)
+  author   String?
+  /// Le texte brut reçu, conservé tel quel pour pouvoir revenir dessus.
+  rawInput String?
+
+  status   PlanStatus @default(DRAFT)
+  warnings String[]   @default([])
+  error    String?
+
+  version Int @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clips Clip[]
+
+  @@index([rushId, status])
+}
+
+enum ClipStatus {
+  RENDERING
+  READY
+  APPROVED
+  REJECTED
+  SCHEDULED
+  PUBLISHED
+  FAILED
+}
+
+model Clip {
+  id         String    @id @default(cuid())
+  rushId     String
+  rush       Rush      @relation(fields: [rushId], references: [id], onDelete: Cascade)
+  clientId   String?
+  client     Client?   @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  momentId   String?
+  moment     Moment?   @relation(fields: [momentId], references: [id], onDelete: SetNull)
+  hookId     String?
+  hook       Hook?     @relation(fields: [hookId], references: [id], onDelete: SetNull)
+  editPlanId String?
+  editPlan   EditPlan? @relation(fields: [editPlanId], references: [id], onDelete: SetNull)
+
+  title    String
+  caption  String?
+  hashtags String[] @default([])
+
+  version    Int     @default(1)
+  replacesId String?
+
+  filePath    String?
+  previewPath String?
+  publicUrl   String?
+  durationSec Float?
+  width       Int?
+  height      Int?
+  sizeBytes   BigInt?
+
+  /// Résumé des coupes exécutées, pour relire le montage sans rouvrir le plan.
+  cutsSummary  Json?
+  renderRecipe Json?
+  renderLog    String?
+
+  status   ClipStatus @default(RENDERING)
+  qaScore  Int?
+  qaIssues String[]   @default([])
+
+  views  Int @default(0)
+  likes  Int @default(0)
+  shares Int @default(0)
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  approvedAt DateTime?
+
+  reviews      ClipReview[]
+  publications Publication[]
+  deliveries   Delivery[]
+
+  @@index([status])
+  @@index([clientId, status])
+}
+
+enum DeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
+/// Dépôt du clip fini dans le dossier synchronisé (Drive, Dropbox…).
+/// C'est la remise réelle : le fichier quitte la plateforme et part chez
+/// le client, ou vers l'outil qui publiera.
+model Delivery {
+  id       String  @id @default(cuid())
+  clipId   String
+  clip     Clip    @relation(fields: [clipId], references: [id], onDelete: Cascade)
+  clientId String?
+  client   Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  /// Dossier racine au moment de la livraison (le Drive local).
+  rootDir     String
+  /// Chemin du fichier vidéo, relatif à la racine.
+  filePath    String
+  /// Fiche de légende déposée à côté de la vidéo.
+  sidecarPath String?
+  thumbPath   String?
+  /// URL publique, si le dossier est aussi exposé en ligne.
+  publicUrl   String?
+
+  sizeBytes BigInt?
+  status    DeliveryStatus @default(PENDING)
+  error     String?
+
+  deliveredAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([clipId])
+  @@index([status])
+}
+
+model ClipReview {
+  id         String  @id @default(cuid())
+  clipId     String
+  clip       Clip    @relation(fields: [clipId], references: [id], onDelete: Cascade)
+  reviewerId String?
+  reviewer   User?   @relation(fields: [reviewerId], references: [id], onDelete: SetNull)
+
+  decision ReviewDecision
+  comment  String?
+  ratings  Json?
+
+  createdAt DateTime @default(now())
+}
+
+enum ReviewDecision {
+  APPROVED
+  REJECTED
+  CHANGES_REQUESTED
+}
+
+// ─────────────────────────────────────────────────────────────
+// ÉTAGE 5 — PUBLICATION VIA METRICOOL
+// ─────────────────────────────────────────────────────────────
+
+model Publication {
+  id       String  @id @default(cuid())
+  clipId   String
+  clip     Clip    @relation(fields: [clipId], references: [id], onDelete: Cascade)
+  clientId String?
+  client   Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  network      String
+  blogId       String
+  text         String
+  firstComment String?
+
+  scheduledAtLocal String
+  timezone         String
+  scheduledAt      DateTime
+
+  autoPublish Boolean @default(true)
+  draft       Boolean @default(false)
+  networkData Json?
+
+  mediaUrl String?
+  mediaId  String?
+
+  status          PublicationStatus @default(QUEUED)
+  attempts        Int               @default(0)
+  lastError       String?
+  metricoolPostId String?
+  metricoolRaw    Json?
+  requestPayload  Json?
+
+  publishedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status, scheduledAt])
+  @@index([clipId])
+}
+
+enum PublicationStatus {
+  QUEUED
+  SCHEDULING
+  SCHEDULED
+  PUBLISHED
+  FAILED
+  CANCELED
+}
+
+/// Journal du pipeline : chaque étage écrit ici.
+model PipelineEvent {
+  id         String   @id @default(cuid())
+  stage      String // whop | ingest | transcribe | detect | hook | brief | plan | render | review | publish
+  entity     String
+  level      String   @default("info")
+  message    String
+  data       Json?
+  durationMs Int?
+  createdAt  DateTime @default(now())
+
+  @@index([stage, createdAt])
+  @@index([entity])
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
