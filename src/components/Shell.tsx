@@ -4,8 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
-  UserSearch,
-  Megaphone,
+  Users,
   FileVideo,
   Scissors,
   CheckCircle2,
@@ -16,10 +15,9 @@ import {
 /** La navigation suit l'ordre réel du flux : Whop → rush → montage → publication. */
 const NAV = [
   { href: "/", label: "Pipeline", icon: LayoutDashboard, stage: null },
-  { href: "/recruitment", label: "Recrutement", icon: UserSearch, stage: 1 },
-  { href: "/campaigns", label: "Campagnes", icon: Megaphone, stage: null },
+  { href: "/clients", label: "Clients", icon: Users, stage: 1 },
   { href: "/rushes", label: "Rushes", icon: FileVideo, stage: 2 },
-  { href: "/studio", label: "Montage", icon: Scissors, stage: 3 },
+  { href: "/montage", label: "Montage", icon: Scissors, stage: 3 },
   { href: "/review", label: "Validation", icon: CheckCircle2, stage: 4 },
   { href: "/publishing", label: "Publication", icon: CalendarClock, stage: 5 },
   { href: "/settings", label: "Réglages", icon: Settings, stage: null },
@@ -120,10 +118,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
             lineHeight: 1.5,
           }}
         >
-          Le flux : <strong style={{ color: "var(--stage-1)" }}>Whop</strong> recrute,{" "}
-          <strong style={{ color: "var(--stage-2)" }}>le rush</strong> est transcrit,{" "}
-          <strong style={{ color: "var(--stage-3)" }}>les moments</strong> sont scorés,{" "}
-          <strong style={{ color: "var(--stage-4)" }}>le clip</strong> est monté,{" "}
+          <strong style={{ color: "var(--stage-1)" }}>Whop</strong> amène les clients,{" "}
+          <strong style={{ color: "var(--stage-2)" }}>le rush</strong> est transcrit et analysé,{" "}
+          <strong style={{ color: "var(--stage-3)" }}>je monte avec Claude</strong>,{" "}
+          <strong style={{ color: "var(--stage-4)" }}>je valide</strong>,{" "}
           <strong style={{ color: "var(--stage-5)" }}>Metricool</strong> publie.
         </div>
       </aside>

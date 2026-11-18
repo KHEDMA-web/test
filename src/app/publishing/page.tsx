@@ -15,7 +15,7 @@ export default async function PublishingPage() {
   const [publications, counts] = await Promise.all([
     prisma.publication.findMany({
       orderBy: { scheduledAt: "asc" },
-      include: { clip: { include: { campaign: true } } },
+      include: { clip: { include: { client: true } } },
     }),
     prisma.publication.groupBy({ by: ["status"], _count: { _all: true } }),
   ]);
@@ -77,7 +77,7 @@ export default async function PublishingPage() {
                   {dayPubs.slice(0, 4).map((p) => (
                     <Link
                       key={p.id}
-                      href={`/studio/${p.clipId}`}
+                      href={`/clips/${p.clipId}`}
                       style={{
                         fontSize: "0.66rem",
                         padding: "0.2rem 0.35rem",
@@ -127,8 +127,8 @@ export default async function PublishingPage() {
               {publications.map((p) => (
                 <tr key={p.id}>
                   <td style={{ maxWidth: "22rem" }}>
-                    <Link href={`/studio/${p.clipId}`} style={{ fontWeight: 500 }}>{p.clip.title}</Link>
-                    <div style={{ fontSize: "0.72rem", color: "var(--text-faint)" }}>{p.clip.campaign?.name ?? "sans campagne"}</div>
+                    <Link href={`/clips/${p.clipId}`} style={{ fontWeight: 500 }}>{p.clip.title}</Link>
+                    <div style={{ fontSize: "0.72rem", color: "var(--text-faint)" }}>{p.clip.client?.name ?? "sans client"}</div>
                   </td>
                   <td><span className="badge">{p.network}</span></td>
                   <td className="mono" style={{ fontSize: "0.76rem" }}>

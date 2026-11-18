@@ -1,16 +1,18 @@
-# ClipFlow — du rush à la mise en ligne
+# ClipFlow — mon atelier de clipping
 
-Plateforme de clipping complète. Le flux suit l'ordre demandé :
+Je vends du clipping sur Whop. Les clients paient, je récupère ou je vais
+chercher leur matière, **je monte avec Claude**, et Metricool publie.
 
 ```
-① Whop            ② Rush              ③ Moments & hooks     ④ Montage           ⑤ Metricool
-   recrutement   →   transcription   →   détection scorée  →   auto + clipper  →   publication
-   des clippers      horodatée           + hooks notés          9:16, review        programmée
+① Whop            ② Rush             ③ Montage              ④ Validation  ⑤ Metricool
+   les clients   →   transcription  →   brief → Claude →   →   ma relecture →  publication
+   qui paient        moments scorés     plan → FFmpeg                           programmée
 ```
 
-Chaque étage est autonome : on peut relancer la détection sans refaire la
-transcription, remonter un clip sans retoucher le rush, rejouer une
-publication sans reprendre le montage.
+La plateforme ne décide pas du montage. Elle prépare tout ce qu'il faut pour
+décider (transcription horodatée, moments scorés, hooks candidats), met ça en
+forme de brief, puis **exécute le plan que Claude rend**. La décision
+éditoriale reste dans la conversation ; l'exécution est automatique.
 
 ---
 
@@ -18,155 +20,172 @@ publication sans reprendre le montage.
 
 ```bash
 npm install
-cp .env.example .env          # CLIPFLOW_MOCK=1 par défaut : tout tourne sans clé
-npm run db:push               # crée le schéma
-npm run db:seed               # peuple une plateforme vivante (rush de test inclus)
+cp .env.example .env          # CLIPFLOW_MOCK=1 : tout tourne sans clé
+npm run db:push
+npm run db:seed               # atelier déjà en activité, rush de test inclus
 npm run dev                   # http://localhost:3000
 ```
 
-Prérequis : Node 22+, PostgreSQL 16+, **ffmpeg et ffprobe** dans le `PATH`
-(le rendu des clips et la sonde des rushes en dépendent).
+Prérequis : Node 22+, PostgreSQL 16+, **ffmpeg et ffprobe** dans le `PATH`.
 
 ```bash
-npm test          # 30 tests : scoring, signature webhook, ASS, payload Metricool
+npm test          # 49 tests : qualification, plans, remappage, Metricool…
 npm run typecheck
 npm run build
 ```
 
 ---
 
-## Mode mock et bascule en réel
+## ③ Le montage avec Claude
 
-Sans clé, chaque intégration tourne en mock : le flux complet
-rush → publication s'exécute **sans aucun appel réseau**. Dès qu'une clé est
-renseignée, l'étage correspondant passe en réel, sans modification de code —
-le code appelant est strictement le même (`src/lib/config.ts` → `live.*`).
+C'est la boucle centrale. Page `/rushes/<id>/montage` :
 
-| Étage | Variables | Sans clé |
-|---|---|---|
-| ① Whop API | `WHOP_API_KEY` | 6 candidats fictifs scorés |
-| ① Webhook | `WHOP_WEBHOOK_SECRET` | endpoint refuse tout (503) tant que la signature n'est pas vérifiable |
-| ① OAuth | `WHOP_OAUTH_CLIENT_ID/SECRET` | profil de démonstration |
-| ② Transcription | `TRANSCRIPTION_PROVIDER` + clé | faux podcast français horodaté |
-| ③ Hooks | `HOOKS_PROVIDER=anthropic` + `ANTHROPIC_API_KEY` | générateur heuristique |
-| ⑤ Metricool | `METRICOOL_USER_TOKEN`, `_USER_ID`, `_BLOG_ID` | posts stockés en mémoire |
+**1. Copier le brief.** Un document autonome (~15 k caractères pour un rush de
+4 minutes) qui contient le brief du client, ses consignes de hook, ce qu'il
+veut éviter, la durée de clip attendue, la transcription horodatée seconde par
+seconde, les moments repérés avec le détail de leur score, les hooks
+candidats, et le format JSON exact de la réponse attendue.
 
-L'état réel de chaque étage est visible dans **Réglages**.
+Les moments repérés sont donnés comme **indices, pas comme consignes** : le
+brief dit explicitement à Claude qu'il peut couper ailleurs, recoller deux
+passages distants, ou ignorer un moment bien noté s'il ne tient pas.
+
+**2. Coller la réponse.** Le parseur est tolérant sur la forme et strict sur le
+fond :
+
+- le JSON est extrait même entouré de prose ou de blocs ```` ```json ````
+- `1:31.5` est accepté là où le brief demandait `91.5`
+- un plan unique sans tableau `clips` passe aussi
+- les coupes sont vérifiées contre le rush : une fin au-delà de la durée est
+  tronquée (avertissement), une coupe inversée est refusée (erreur)
+- **les bornes sont recalées sur la parole** (±0,35 s) pour ne pas couper au
+  milieu d'un mot, et le recalage est affiché
+- durée hors bornes, chevauchement de coupes, hook de plus de 58 caractères :
+  avertissements visibles, le rendu reste possible
+
+**3. Le rendu.** FFmpeg exécute le plan en une passe : découpe de chaque coupe,
+recollage **dans l'ordre donné par le plan** (deux passages peuvent être
+inversés si le montage le demande), passage en 1080×1920, zoom facultatif par
+coupe, sous-titres incrustés, hook en overlay, audio normalisé à −14 LUFS.
+
+Le point technique qui compte : **les sous-titres sont reprojetés sur la
+timeline montée**. Un mot prononcé à 2:31 dans le rush et gardé dans la
+deuxième coupe s'affiche à 0:12 dans le clip. Sans ce remappage, les
+sous-titres défileraient sur les mauvaises images dès qu'il y a plus d'une
+coupe.
+
+### Le format du plan
+
+```json
+{
+  "version": "clipflow-plan-1",
+  "clips": [{
+    "title": "Sept ans sur le mauvais problème",
+    "hook": "7 ans perdus sur le mauvais problème",
+    "caption": "La légende du post",
+    "hashtags": ["business"],
+    "cuts": [
+      { "start": 53.1, "end": 80.1, "note": "l'aveu et sa mise en place" },
+      { "start": 84.5, "end": 107.2, "note": "on saute la relance de l'hôte", "zoom": 1.08 }
+    ],
+    "framing": "fit-blur",
+    "burnSubtitles": true,
+    "captionOverrides": [],
+    "rationale": "Pourquoi ce montage tient."
+  }]
+}
+```
+
+### Sans passer par l'interface
+
+Claude Code — ou n'importe quel script — peut travailler directement :
+
+```bash
+curl -s localhost:3000/api/rushes/<id>/brief > brief.md     # récupérer le brief
+curl -X POST localhost:3000/api/edit-plans \                # déposer le plan
+     -H 'content-type: application/json' \
+     -d '{"rushId":"<id>","plan":{…},"render":true}'
+```
+
+La réponse donne les plans enregistrés, les avertissements, et l'identifiant
+des clips rendus.
 
 ---
 
-## Étage ① — Whop : trouver les bonnes personnes
+## ① Whop — les clients qui paient
 
-**Entrées** : webhook signé (temps réel) ou synchronisation manuelle.
+Les abonnements arrivent par webhook signé (Standard Webhooks : HMAC-SHA256
+sur le corps brut, tolérance 5 minutes, déduplication sur `webhook-id`) ou par
+synchronisation manuelle. Le schéma de payload n'étant pas intégralement
+publié, le normaliseur accepte plusieurs variantes de nommage.
 
-Le webhook suit la spécification **Standard Webhooks** telle que Whop
-l'implémente : en-têtes `webhook-id` / `webhook-timestamp` /
-`webhook-signature`, HMAC-SHA256 sur `{id}.{timestamp}.{corps brut}`, clé =
-la chaîne `ws_...` complète. Le corps est vérifié **avant** tout parsing,
-l'horodatage est rejeté au-delà de 5 minutes, et la livraison est
-dédupliquée sur `webhook-id` (Whop livre *at-least-once*).
+**La qualification répond à une seule question : ce client vaut-il mon temps ?**
+Sur 100 : valeur de l'abonnement 25 · matière disponible 20 · **prix par clip
+15** · potentiel de diffusion 15 · clarté du brief 15 · paiement 10.
 
-La doc publique de Whop se contredit sur les noms exacts des événements
-`membership.*` : toute la famille est donc traitée de la même façon et
-**l'état est recalculé depuis le payload**, jamais déduit du nom de
-l'événement. Le schéma du payload n'étant pas publié intégralement, le
-normaliseur accepte plusieurs variantes de nommage (`user_id` / `user`,
-`product_id` / `access_pass`, epoch ou ISO).
+Le prix par clip a un droit de veto : en dessous de 15 € le clip, le dossier
+est refusé quel que soit son score. C'est le piège du volume — un client à
+390 €/mois pour 40 clips affiche 74/100 sur le papier et reste une mauvaise
+affaire à 9,75 € le clip.
 
-**Scoring des candidatures** (`src/lib/whop/recruiting.ts`), sur 100 :
-preuves de travail 25 · traction passée 25 · niche demandée 15 · audience 15 ·
-outils 10 · membership valide 10. ≥ 70 → accès automatique, 45–69 →
-décision humaine, < 45 → écarté.
+Un abonnement impayé ne bloque pas la qualification mais ouvre le résumé :
+« ne rien produire tant que le paiement n'est pas régularisé ».
 
-**Scoring des clippers**, recalculé à chaque décision, uniquement sur des
-résultats observés : taux de validation 30 · vues moyennes 30 ·
-ponctualité 20 · volume 10 · activité récente 10. Sous 5 clips soumis, le
-taux de validation est bridé : un 2/2 ne vaut pas un 40/40.
+**La priorité de production** est un second score, distinct : un retard
+d'échéance vaut 60 points et passe donc devant le cumul de tous les autres
+critères (55 au maximum). Une promesse rompue coûte plus cher qu'un gros
+client servi un jour plus tard.
 
-**Attribution** : adéquation clipper ↔ rush sur historique 40 · niche 25 ·
-charge actuelle 20 · délai 10 · langue 5. Un clipper saturé sort du classement.
+## ② Le rush
 
-Aucun score n'est opaque : chaque critère expose sa valeur brute, ses points
-et son maximum, affichés dans l'interface.
+Déposé par le client ou sourcé par moi (la distinction est tracée et pèse dans
+la qualification). Sonde `ffprobe`, puis transcription derrière une interface
+unique — OpenAI Whisper, Deepgram, `whisper` local, ou mock — avec horodatage
+**au mot**, ce qui permet les sous-titres en groupes de 3–4 mots.
 
-## Étage ② — Rush et transcription
+La détection de moments note des fenêtres glissantes sur 8 critères (ouverture
+accrocheuse 18, charge émotionnelle 16, faits et chiffres 14, retournement 12,
+compréhensible seul 12, débit utile 12, durée 8, rythme 8), pénalise les
+passages logistiques et le remplissage oral, puis écarte les moments qui se
+recouvrent à plus de 35 %. Les hooks candidats sont notés sur brièveté,
+spécificité, tension, ouverture, lisibilité et **fidélité au contenu**.
 
-Sonde `ffprobe` (durée, résolution, fps, piste audio), puis transcription
-derrière une interface unique : OpenAI Whisper, Deepgram, `whisper` local,
-ou mock. Les segments sont stockés avec horodatage **au mot**, ce qui permet
-les sous-titres en groupes de 3–4 mots au montage.
+Tout ça n'existe que pour nourrir le brief.
 
-## Étage ③ — Les meilleurs moments et les meilleurs hooks
+## ④ Ma validation · ⑤ Metricool
 
-`src/lib/pipeline/moments.ts` — fonction pure, testable, déterministe.
-Fenêtres glissantes de segments consécutifs dans la fourchette de durée,
-notées sur 8 critères (100 points) :
+Un clip validé compte dans le quota mensuel du client et devient publiable.
 
-| Critère | Poids | Ce qu'il mesure |
+Publication : `POST /v2/scheduler/posts`, en-tête `X-Mc-Auth`, `userId` et
+`blogId` en query string, date **locale sans décalage** + fuseau IANA. Une date
+passée est repoussée de 5 minutes plutôt que de provoquer un 400. La file
+distingue les erreurs récupérables (réseau, 429, 5xx → rejouées, 4 tentatives)
+des refus définitifs (400, 401, 403 → arrêtés).
+
+> Divergence documentaire assumée : le guide Metricool décrit `media` comme un
+> objet `{ mediaId }`, la page White Label comme un tableau de chaînes. Le
+> format est un réglage (`mediaMode`, défaut `array`), pas une supposition.
+
+---
+
+## Mode mock
+
+Sans clé, chaque intégration tourne en mock et le flux complet s'exécute sans
+aucun appel réseau. Une clé renseignée bascule l'étage en réel, sans
+modification de code. L'état de chaque étage est visible dans **Réglages**.
+
+| Étage | Variables | Sans clé |
 |---|---|---|
-| Ouverture accrocheuse | 18 | le clip tient-il debout dès la première seconde |
-| Charge émotionnelle | 16 | lexique d'intensité, 6 familles |
-| Faits et chiffres | 14 | nombres, pourcentages, durées |
-| Retournement narratif | 12 | « sauf que », « ce que personne », « jusqu'au jour » |
-| Compréhensible seul | 12 | début net, fin non tronquée, pas de pronom orphelin |
-| Débit utile | 12 | mots/seconde vs ~2,8 idéal |
-| Durée | 8 | zone 22–45 s |
-| Rythme | 8 | blancs internes |
+| ① Whop API | `WHOP_API_KEY` | 6 clients fictifs contrastés |
+| ① Webhook | `WHOP_WEBHOOK_SECRET` | l'endpoint refuse tout (503) |
+| ① OAuth | `WHOP_OAUTH_CLIENT_ID/SECRET` | profil de démonstration |
+| ② Transcription | `TRANSCRIPTION_PROVIDER` + clé | faux podcast français horodaté |
+| ② Hooks candidats | `ANTHROPIC_API_KEY` | générateur heuristique |
+| ⑤ Metricool | `METRICOOL_USER_TOKEN`, `_USER_ID`, `_BLOG_ID` | posts en mémoire |
 
-Pénalités : passage logistique (intro, remerciements, appel à l'abonnement),
-remplissage oral. Puis suppression des chevauchements : deux moments qui
-partagent plus de 35 % de leur durée se cannibaliseraient, seul le meilleur
-est gardé.
-
-**Hooks** : 7 angles (question, chiffre, contrarien, curiosity-gap,
-confession, promesse, callout), remplis avec ce que le passage contient
-réellement — groupes nominaux extraits par déterminant (sans étiqueteur
-morphosyntaxique, c'est l'heuristique qui évite les formes verbales), et
-seulement les vrais nombres. Chaque hook est noté sur 100 : brièveté 20 ·
-spécificité 20 · tension 20 · ouverture 15 · lisibilité 15 · **fidélité au
-contenu 10** — un hook inventé perd des points.
-
-Avec `ANTHROPIC_API_KEY`, Claude réécrit les hooks (sortie structurée par
-outil strict, `tool_choice` laissé en `auto` puisque le forcer renvoie un
-400 sur les modèles courants). Ses propositions passent par **le même
-scorer** : elles ne sont pas retenues d'office. Si l'appel échoue, le
-pipeline continue sur l'heuristique.
-
-## Étage ④ — Montage hybride
-
-- **Brouillon automatique** : FFmpeg découpe le moment, passe en 1080×1920
-  (recadrage centré, ou fond flou pour un rush paysage), incruste les
-  sous-titres et le hook via un fichier ASS unique (libass gère retour à la
-  ligne, contour et placement — plus fiable qu'une pile de `drawtext`),
-  normalise l'audio à −14 LUFS.
-- **Version du clipper** : le fichier déposé crée une **nouvelle révision**
-  chaînée au brouillon, qui reste consultable comme référence.
-- **Contrôle qualité automatique** avant review : format 9:16, durée dans
-  les bornes de la campagne, hook lisible.
-- **Review** : valider / demander des corrections / refuser. La décision
-  met à jour le score du clipper, qui pilote les attributions suivantes.
-
-## Étage ⑤ — Publication via Metricool
-
-`POST https://app.metricool.com/api/v2/scheduler/posts?blogId=…&userId=…`,
-jeton dans l'en-tête `X-Mc-Auth`. La date part en **heure locale sans
-décalage** (`2026-08-01T10:00:00`) accompagnée du fuseau IANA, comme l'exige
-l'API ; une date passée est automatiquement repoussée de 5 minutes plutôt
-que de provoquer un 400.
-
-Un clip validé produit une publication par réseau, décalées de quelques
-minutes. La file distingue les erreurs **récupérables** (réseau, 429, 5xx →
-rejouées, 4 tentatives) des **définitives** (400, 401, 403 → marquées en
-échec sans boucler). Chaque code d'erreur est traduit en message
-actionnable.
-
-> Point de divergence documentaire assumé : le guide « Basic Guide for API
-> Integration » décrit `media` comme un objet `{ mediaId }`, la page White
-> Label comme un tableau de chaînes. Le format est donc un **réglage**
-> (`mediaMode`, défaut `array`) plutôt qu'une supposition figée.
-
-Traitement de la file : bouton dans l'interface, ou cron sur
-`GET /api/cron/publish` (protégé par `CRON_SECRET` si défini).
+`ANTHROPIC_API_KEY` ne sert qu'à enrichir les **hooks candidats** du brief.
+Le montage, lui, se fait dans le chat : la plateforme n'appelle aucune API
+pour ça.
 
 ---
 
@@ -174,42 +193,44 @@ Traitement de la file : bouton dans l'interface, ou cron sur
 
 | Page | Rôle |
 |---|---|
-| `/` | entonnoir des 5 étages, journal du pipeline, état des intégrations |
-| `/recruitment` | candidatures Whop scorées et dépliables, classement des clippers |
-| `/campaigns` | brief, consignes de hook, réseaux, rémunération, budget |
-| `/rushes` + `/rushes/[id]` | import, carte des moments sur la durée, transcription, hooks, attribution |
-| `/studio` + `/studio/[id]` | lecteur 9:16, recette FFmpeg, révisions, dépôt de version, programmation |
-| `/review` | file de validation |
+| `/` | le flux en cinq étages, revenu, quotas, journal |
+| `/clients` | abonnements Whop qualifiés, brief éditable par client |
+| `/rushes` · `/rushes/[id]` | import, carte des moments, transcription, hooks |
+| `/rushes/[id]/montage` | **brief → Claude → plan → rendu** |
+| `/montage` | ma file de travail, classée par urgence client |
+| `/review` | ma relecture avant mise en ligne |
 | `/publishing` | calendrier 7 jours et file Metricool |
-| `/settings` | état réel de chaque intégration, URL du webhook, derniers webhooks reçus |
+| `/settings` | état des intégrations, URL du webhook |
 
 ## API
 
 | Route | Usage |
 |---|---|
-| `POST /api/whop/webhook` | réception signée des memberships |
-| `GET /api/whop/oauth/start` · `/callback` | « Se connecter avec Whop » (PKCE) |
-| `POST /api/pipeline` | lance le flux complet sur un rush (`filePath` ou `sourceUrl`) |
-| `GET /api/cron/publish` | traite la file de publication |
-| `GET /api/media/...` | sert rushes et clips, requêtes `Range` gérées |
+| `GET /api/rushes/[id]/brief` | le brief (`?format=json`, `?clips=3`, `?transcript=around-moments`) |
+| `POST /api/edit-plans` | déposer un plan, avec `render: true` pour enchaîner |
+| `GET /api/edit-plans?rushId=` | les plans d'un rush |
+| `POST /api/pipeline` | préparer un rush jusqu'au brief |
+| `POST /api/whop/webhook` | abonnements signés |
+| `GET /api/cron/publish` | traiter la file de publication |
+| `GET /api/media/...` | rushes et clips, requêtes `Range` gérées |
 
 ---
 
 ## Limites connues
 
-- **Stockage local.** Les médias vivent dans `./storage`. Metricool exige
-  une URL **publique et non expirante** : en production, pointez
-  `CLIPFLOW_PUBLIC_BASE_URL` vers un domaine joignable, ou basculez le
-  stockage vers S3/R2.
+- **Stockage local.** Les médias vivent dans `./storage`. Metricool exige une
+  URL publique non expirante : en production, pointez
+  `CLIPFLOW_PUBLIC_BASE_URL` vers un domaine joignable ou passez sur S3/R2.
 - **Pas d'authentification applicative.** L'OAuth Whop identifie et vérifie
-  l'accès, mais il n'y a pas encore de session ni de cloisonnement par rôle
-  dans l'UI : à ajouter avant une mise en ligne publique.
-- **Rendu synchrone.** Les rendus FFmpeg tournent dans le processus web. Au
-  delà de quelques clips simultanés, il faut une file de travaux séparée.
-- **Chemins REST Whop.** La doc publique décrit les memberships via le SDK
-  sans donner tous les chemins HTTP bruts ; ils sont centralisés dans
-  `WHOP_PATHS` (`src/lib/whop/client.ts`) pour être corrigés en un seul
-  endroit si la spec OpenAPI diffère.
-- **Vues non synchronisées.** Les compteurs de vues sont alimentés par le
-  seed ; aucun endpoint d'analytics Metricool n'est documenté publiquement,
-  la récupération reste à brancher.
+  l'abonnement, mais l'interface n'est pas protégée : à faire avant de
+  l'exposer.
+- **Rendu synchrone.** FFmpeg tourne dans le processus web. Au-delà de
+  quelques clips simultanés, il faut une file de travaux séparée.
+- **Le brief grossit avec le rush.** 15 k caractères pour 4 minutes, donc
+  environ 200 k pour une heure. Au-delà d'une vingtaine de minutes, utilisez
+  `?transcript=around-moments` pour n'envoyer que les passages utiles.
+- **Aucune récupération des vues.** Metricool ne documente pas d'endpoint
+  d'analytics public ; les compteurs viennent du seed.
+- **Chemins REST Whop.** La doc publique passe par le SDK sans donner tous les
+  chemins HTTP ; ils sont centralisés dans `WHOP_PATHS` pour être corrigés en
+  un seul endroit.

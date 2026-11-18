@@ -3,9 +3,8 @@ import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { PageHeader, StatusBadge, ScorePill, Meter, ScoreBreakdown, Empty, scoreColor, type Criterion } from "@/components/ui";
 import { SubmitButton } from "@/components/SubmitButton";
-import { transcribeRushAction, detectMomentsAction, renderDraftAction, selectHookAction, assignRushAction } from "@/app/actions";
+import { transcribeRushAction, detectMomentsAction, selectHookAction } from "@/app/actions";
 import { formatDuration, formatTimecode } from "@/lib/utils";
-import { rankClippersForRush } from "@/lib/pipeline/assign";
 
 export const dynamic = "force-dynamic";
 
@@ -18,24 +17,22 @@ export default async function RushDetailPage({ params }: { params: Promise<{ id:
   const rush = await prisma.rush.findUnique({
     where: { id },
     include: {
-      campaign: true,
+      client: true,
       segments: { orderBy: { idx: "asc" } },
       moments: { orderBy: { startSec: "asc" }, include: { hooks: { orderBy: { score: "desc" } }, clips: true } },
-      assignments: { include: { clipper: { include: { user: true } } } },
     },
   });
   if (!rush) notFound();
 
   const duration = rush.durationSec ?? Math.max(...rush.segments.map((s) => s.endSec), 1);
-  const ranked = rush.campaignId ? await rankClippersForRush(rush.id).catch(() => []) : [];
   const topMoment = [...rush.moments].sort((a, b) => b.score - a.score)[0];
 
   return (
     <>
       <PageHeader
-        stage="Étage 2–3 · Rush, moments et hooks"
+        stage="Étage 2 · Analyse du rush"
         title={rush.title}
-        description={`${formatDuration(rush.durationSec)} · ${rush.width ?? "?"}×${rush.height ?? "?"} · ${rush.segments.length} segments transcrits · ${rush.moments.length} moments retenus${rush.campaign ? ` · campagne « ${rush.campaign.name} »` : ""}`}
+        description={`${formatDuration(rush.durationSec)} · ${rush.width ?? "?"}×${rush.height ?? "?"} · ${rush.segments.length} segments transcrits · ${rush.moments.length} moments repérés${rush.client ? ` · client ${rush.client.name}` : ""}`}
         actions={
           <>
             <form action={transcribeRushAction}>
@@ -46,10 +43,13 @@ export default async function RushDetailPage({ params }: { params: Promise<{ id:
             </form>
             <form action={detectMomentsAction}>
               <input type="hidden" name="rushId" value={rush.id} />
-              <SubmitButton className="btn-primary" pendingLabel="Détection…" >
-                Détecter les moments
-              </SubmitButton>
+              <SubmitButton pendingLabel="Détection…">Détecter les moments</SubmitButton>
             </form>
+            {rush.transcriptStatus === "DONE" ? (
+              <Link href={`/rushes/${rush.id}/montage`} className="btn btn-primary">
+                Monter avec Claude →
+              </Link>
+            ) : null}
           </>
         }
       />
@@ -106,57 +106,6 @@ export default async function RushDetailPage({ params }: { params: Promise<{ id:
         </div>
       </section>
 
-      {/* ── Attribution ───────────────────────────────────── */}
-      {rush.campaignId ? (
-        <section className="card" style={{ padding: "1.1rem 1.2rem", marginBottom: "1.4rem" }}>
-          <h2 style={{ margin: "0 0 0.3rem", fontSize: "0.88rem", fontWeight: 600 }}>Attribution à un clipper</h2>
-          <p style={{ margin: "0 0 0.9rem", fontSize: "0.78rem", color: "var(--text-muted)" }}>
-            Classement par adéquation : historique du clipper, recouvrement de niche, charge actuelle, délai de livraison, langue.
-          </p>
-
-          {rush.assignments.length > 0 ? (
-            <div style={{ marginBottom: "1rem", display: "grid", gap: "0.4rem" }}>
-              {rush.assignments.map((a) => (
-                <div key={a.id} style={{ display: "flex", gap: "0.6rem", alignItems: "center", fontSize: "0.82rem" }}>
-                  <StatusBadge status={a.status} />
-                  <strong>{a.clipper.user.name}</strong>
-                  <span style={{ color: "var(--text-muted)" }}>{a.matchReason}</span>
-                  <span className="mono" style={{ marginLeft: "auto", color: "var(--text-faint)" }}>
-                    {a.quota} clip(s) · échéance {a.dueAt ? new Date(a.dueAt).toLocaleDateString("fr-FR") : "—"}
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-
-          {ranked.length === 0 ? (
-            <p style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>Aucun clipper disponible.</p>
-          ) : (
-            <div style={{ display: "grid", gap: "0.5rem" }}>
-              {ranked.slice(0, 4).map((r) => (
-                <form
-                  key={r.clipperId}
-                  action={assignRushAction}
-                  style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 10rem auto", gap: "0.8rem", alignItems: "center" }}
-                >
-                  <input type="hidden" name="rushId" value={rush.id} />
-                  <input type="hidden" name="clipperId" value={r.clipperId} />
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: "0.84rem", fontWeight: 500 }}>{r.name}</div>
-                    <div style={{ fontSize: "0.73rem", color: "var(--text-faint)" }}>{r.match.reason}</div>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    <Meter value={r.match.score} />
-                    <span className="mono" style={{ fontSize: "0.76rem", color: scoreColor(r.match.score) }}>{r.match.score}</span>
-                  </div>
-                  <SubmitButton pendingLabel="Attribution…">Attribuer</SubmitButton>
-                </form>
-              ))}
-            </div>
-          )}
-        </section>
-      ) : null}
-
       {/* ── Moments ───────────────────────────────────────── */}
       <h2 style={{ fontSize: "1rem", fontWeight: 600, margin: "0 0 0.8rem" }}>
         Moments retenus {topMoment ? <span style={{ color: "var(--text-faint)", fontWeight: 400, fontSize: "0.82rem" }}>— meilleur score {topMoment.score}/100</span> : null}
@@ -168,7 +117,6 @@ export default async function RushDetailPage({ params }: { params: Promise<{ id:
         <div style={{ display: "grid", gap: "1rem" }}>
           {[...rush.moments].sort((a, b) => b.score - a.score).map((m) => {
             const bd = m.scoreBreakdown as unknown as MomentBreakdown | null;
-            const selectedHook = m.hooks.find((h) => h.selected) ?? m.hooks[0];
             return (
               <article key={m.id} id={`moment-${m.id}`} className="card" style={{ padding: "1.1rem 1.2rem" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", alignItems: "flex-start", marginBottom: "0.8rem", flexWrap: "wrap" }}>
@@ -184,15 +132,9 @@ export default async function RushDetailPage({ params }: { params: Promise<{ id:
                   </div>
                   <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
                     {m.clips.length > 0 ? (
-                      <Link href={`/studio/${m.clips[0].id}`} className="btn">Voir le clip</Link>
+                      <Link href={`/clips/${m.clips[0].id}`} className="btn">Voir le clip</Link>
                     ) : null}
-                    <form action={renderDraftAction}>
-                      <input type="hidden" name="momentId" value={m.id} />
-                      <input type="hidden" name="hookId" value={selectedHook?.id ?? ""} />
-                      <SubmitButton className="btn-primary" pendingLabel="Rendu FFmpeg…">
-                        Monter en 9:16
-                      </SubmitButton>
-                    </form>
+                    <Link href={`/rushes/${rush.id}/montage`} className="btn">Monter ce passage</Link>
                   </div>
                 </div>
 

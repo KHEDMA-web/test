@@ -1,14 +1,14 @@
 /**
  * Pont Whop → base locale.
- * Un membership Whop valide = un clipper qui a accès à la plateforme.
- * Appelé par le webhook (temps réel) et par la synchro manuelle (rattrapage).
+ * Un abonnement Whop valide = un client qui paie pour du clipping.
+ * Appelé par le webhook (temps réel) et par la synchro manuelle.
  */
 import { prisma } from "../db";
 import { logEvent } from "../log";
 import { config } from "../config";
 import { whop, type WhopMembershipDTO } from "./client";
-import { scoreApplication, scoreClipper } from "./recruiting";
-import type { ApplicationStatus } from "@prisma/client";
+import { qualifyClient } from "./qualify";
+import type { ClientStatus, RushSourcing } from "@prisma/client";
 
 function metaArray(meta: Record<string, unknown> | null, key: string): string[] {
   const v = meta?.[key];
@@ -18,61 +18,70 @@ function metaArray(meta: Record<string, unknown> | null, key: string): string[] 
 
 function metaNumber(meta: Record<string, unknown> | null, key: string): number | null {
   const v = meta?.[key];
-  return typeof v === "number" ? v : null;
+  if (typeof v === "number") return v;
+  if (typeof v === "string" && v.trim() !== "" && !Number.isNaN(Number(v))) return Number(v);
+  return null;
 }
 
-/** Niches réellement demandées par les campagnes actives — pondère le score de candidature. */
-async function demandNiches(): Promise<string[]> {
-  const campaigns = await prisma.campaign.findMany({
-    where: { status: "ACTIVE" },
-    select: { targetNetworks: true, brief: true, name: true, slug: true },
-  });
-  // Les niches de campagne sont portées par les tags de brief ; à défaut on
-  // retombe sur une liste vide (score de niche neutralisé côté scoring).
-  const fromSettings = await prisma.setting.findUnique({ where: { key: "demand_niches" } });
-  if (fromSettings?.value) return fromSettings.value.split(",").map((s) => s.trim()).filter(Boolean);
-  return campaigns.length ? ["business", "mindset", "podcast", "tech", "fitness"] : [];
+function metaString(meta: Record<string, unknown> | null, key: string): string | null {
+  const v = meta?.[key];
+  return typeof v === "string" && v.trim() !== "" ? v : null;
+}
+
+/** Statut client déduit du statut d'abonnement Whop. */
+function statusFrom(dto: WhopMembershipDTO, decision: string): ClientStatus {
+  if (dto.status === "past_due") return "PAST_DUE";
+  if (!dto.valid) return dto.status === "canceled" ? "CHURNED" : "PROSPECT";
+  if (decision === "refuser") return "DECLINED";
+  // « À cadrer » n'ouvre pas la production : le dossier attend ma décision.
+  if (decision === "discuter") return "PROSPECT";
+  if (dto.status === "trialing") return "TRIAL";
+  return "ACTIVE";
+}
+
+/** Mes niches de prédilection, utilisées pour pondérer l'adéquation. */
+async function myNiches(): Promise<string[]> {
+  const setting = await prisma.setting.findUnique({ where: { key: "my_niches" } });
+  return setting?.value ? setting.value.split(",").map((s) => s.trim()).filter(Boolean) : [];
 }
 
 /**
- * Enregistre (ou met à jour) un membership : utilisateur, accès, candidature scorée.
- * Idempotent — rejouer le même événement ne duplique rien.
+ * Enregistre ou met à jour un client depuis son abonnement Whop.
+ * Idempotent : rejouer le même événement ne duplique rien.
  */
-export async function upsertMembership(dto: WhopMembershipDTO): Promise<{
-  userId: string | null;
-  applicationId: string | null;
-  granted: boolean;
+export async function upsertClientFromMembership(dto: WhopMembershipDTO): Promise<{
+  clientId: string | null;
+  decision: string;
+  score: number;
 }> {
   if (!dto.id) {
     await logEvent({
       stage: "whop",
       entity: "membership:?",
       level: "warn",
-      message: "Membership sans id ignoré",
+      message: "Abonnement sans identifiant, ignoré",
       data: dto.raw,
     });
-    return { userId: null, applicationId: null, granted: false };
+    return { clientId: null, decision: "ignoré", score: 0 };
   }
 
-  const email = dto.email ?? (dto.userId ? `${dto.userId}@whop.local` : null);
+  const email = dto.email ?? (dto.userId ? `${dto.userId}@whop.local` : `${dto.id}@whop.local`);
+  const meta = dto.metadata;
 
-  // 1. L'utilisateur, identifié par son id Whop puis par son e-mail.
-  let user = dto.userId
-    ? await prisma.user.findUnique({ where: { whopUserId: dto.userId } })
-    : null;
-  if (!user && email) user = await prisma.user.findUnique({ where: { email } });
-
-  if (!user && email) {
+  // L'utilisateur : identifié par son id Whop, puis par son e-mail.
+  let user = dto.userId ? await prisma.user.findUnique({ where: { whopUserId: dto.userId } }) : null;
+  if (!user) user = await prisma.user.findUnique({ where: { email } });
+  if (!user) {
     user = await prisma.user.create({
       data: {
         email,
         name: dto.name ?? dto.username ?? email.split("@")[0],
-        role: "CLIPPER",
+        role: "CLIENT",
         whopUserId: dto.userId,
         whopUsername: dto.username,
       },
     });
-  } else if (user) {
+  } else {
     user = await prisma.user.update({
       where: { id: user.id },
       data: {
@@ -83,7 +92,7 @@ export async function upsertMembership(dto: WhopMembershipDTO): Promise<{
     });
   }
 
-  // 2. Le membership lui-même : source de vérité de l'accès.
+  // L'abonnement : source de vérité du paiement.
   await prisma.whopMembership.upsert({
     where: { whopMembershipId: dto.id },
     create: {
@@ -96,168 +105,137 @@ export async function upsertMembership(dto: WhopMembershipDTO): Promise<{
       valid: dto.valid,
       cancelAtPeriodEnd: dto.cancelAtPeriodEnd,
       currentPeriodEnd: dto.currentPeriodEnd,
-      metadata: (dto.metadata ?? undefined) as never,
+      metadata: (meta ?? undefined) as never,
       raw: dto.raw as never,
-      userId: user?.id,
+      userId: user.id,
     },
     update: {
       status: dto.status,
       valid: dto.valid,
       cancelAtPeriodEnd: dto.cancelAtPeriodEnd,
       currentPeriodEnd: dto.currentPeriodEnd,
-      metadata: (dto.metadata ?? undefined) as never,
+      metadata: (meta ?? undefined) as never,
       raw: dto.raw as never,
-      userId: user?.id,
+      userId: user.id,
       syncedAt: new Date(),
       whopProductId: dto.productId,
       whopPlanId: dto.planId,
     },
   });
 
-  // 3. La candidature, scorée sur les métadonnées fournies à l'inscription Whop.
-  const demand = await demandNiches();
-  const scored = scoreApplication({
-    portfolioUrls: metaArray(dto.metadata, "portfolio"),
-    followerCount: metaNumber(dto.metadata, "followers"),
-    pastClipViews: metaNumber(dto.metadata, "past_clip_views"),
-    editingTools: metaArray(dto.metadata, "tools"),
-    niches: metaArray(dto.metadata, "niches"),
-    languages: metaArray(dto.metadata, "languages"),
+  const clipsPerMonth = metaNumber(meta, "clips_per_month") ?? 8;
+  const mrrCents = metaNumber(meta, "mrr_cents") ?? 0;
+  const sourcing = (metaString(meta, "sourcing") as RushSourcing | null) ?? "CLIENT_PROVIDED";
+
+  const qualified = qualifyClient({
+    mrrCents,
+    clipsPerMonth,
+    backCatalogHours: metaNumber(meta, "back_catalog_hours"),
+    sourcing,
+    audienceSize: metaNumber(meta, "audience_size"),
+    pastClipViews: metaNumber(meta, "past_clip_views"),
+    brief: metaString(meta, "brief"),
+    hookGuidelines: metaString(meta, "hook_guidelines"),
+    niches: metaArray(meta, "niches"),
+    targetNetworks: metaArray(meta, "networks"),
     membershipStatus: dto.status,
     membershipValid: dto.valid,
-    demandNiches: demand,
+    myNiches: await myNiches(),
   });
 
-  const status: ApplicationStatus =
-    !dto.valid ? "PENDING" : scored.decision === "accept" ? "ACCEPTED" : scored.decision === "shortlist" ? "SHORTLISTED" : "REJECTED";
+  const status = statusFrom(dto, qualified.decision);
 
-  const application = await prisma.application.upsert({
+  // Les champs de brief ne sont écrasés que s'ils sont vides côté base :
+  // ce que j'ai affiné à la main prime sur ce que Whop renvoie.
+  const existing = await prisma.client.findUnique({ where: { whopMembershipId: dto.id } });
+
+  const client = await prisma.client.upsert({
     where: { whopMembershipId: dto.id },
     create: {
+      userId: user.id,
+      name: dto.name ?? dto.username ?? "Client Whop",
+      email,
+      handle: dto.username,
       whopMembershipId: dto.id,
       whopUserId: dto.userId,
       whopProductId: dto.productId,
-      email: email ?? `${dto.id}@whop.local`,
-      displayName: dto.name ?? dto.username ?? "Candidat Whop",
-      userId: user?.id,
+      whopPlanId: dto.planId,
+      planName: metaString(meta, "plan_name"),
       status,
-      portfolioUrls: metaArray(dto.metadata, "portfolio"),
-      followerCount: metaNumber(dto.metadata, "followers"),
-      pastClipViews: metaNumber(dto.metadata, "past_clip_views"),
-      editingTools: metaArray(dto.metadata, "tools"),
-      niches: metaArray(dto.metadata, "niches"),
-      languages: metaArray(dto.metadata, "languages"),
-      score: scored.score,
-      scoreBreakdown: scored as never,
-      autoDecision: scored.decision,
+      valid: dto.valid,
+      mrrCents,
+      currentPeriodEnd: dto.currentPeriodEnd,
+      startedAt: dto.valid ? new Date() : null,
+      clipsPerMonth,
+      sourcing,
+      brief: metaString(meta, "brief"),
+      hookGuidelines: metaString(meta, "hook_guidelines"),
+      niches: metaArray(meta, "niches"),
+      targetNetworks: metaArray(meta, "networks"),
+      backCatalogHours: metaNumber(meta, "back_catalog_hours"),
+      audienceSize: metaNumber(meta, "audience_size"),
+      pastClipViews: metaNumber(meta, "past_clip_views"),
+      score: qualified.score,
+      scoreBreakdown: qualified as never,
+      decision: qualified.decision,
+      decisionNote: qualified.summary,
     },
     update: {
       status,
-      score: scored.score,
-      scoreBreakdown: scored as never,
-      autoDecision: scored.decision,
-      userId: user?.id,
-      portfolioUrls: metaArray(dto.metadata, "portfolio"),
-      followerCount: metaNumber(dto.metadata, "followers"),
-      pastClipViews: metaNumber(dto.metadata, "past_clip_views"),
+      valid: dto.valid,
+      mrrCents,
+      currentPeriodEnd: dto.currentPeriodEnd,
+      planName: metaString(meta, "plan_name") ?? existing?.planName,
+      clipsPerMonth,
+      score: qualified.score,
+      scoreBreakdown: qualified as never,
+      decision: qualified.decision,
+      decisionNote: qualified.summary,
+      churnedAt: dto.valid ? null : (existing?.churnedAt ?? new Date()),
+      brief: existing?.brief ?? metaString(meta, "brief"),
+      hookGuidelines: existing?.hookGuidelines ?? metaString(meta, "hook_guidelines"),
+      backCatalogHours: metaNumber(meta, "back_catalog_hours") ?? existing?.backCatalogHours,
+      audienceSize: metaNumber(meta, "audience_size") ?? existing?.audienceSize,
+      pastClipViews: metaNumber(meta, "past_clip_views") ?? existing?.pastClipViews,
     },
   });
 
-  // 4. Accès accordé → profil de clipper prêt à recevoir des missions.
-  let granted = false;
-  if (user && dto.valid && status === "ACCEPTED") {
-    const existing = await prisma.clipperProfile.findUnique({ where: { userId: user.id } });
-    const base = scoreClipper({
-      clipsSubmitted: existing?.clipsSubmitted ?? 0,
-      clipsApproved: existing?.clipsApproved ?? 0,
-      clipsPublished: existing?.clipsPublished ?? 0,
-      totalViews: existing?.totalViews ?? 0,
-      onTimeRate: existing?.onTimeRate ?? 0,
-      medianTurnaroundH: existing?.medianTurnaroundH ?? 0,
-      lastClipAt: existing?.lastClipAt ?? null,
-    });
-    // Un nouveau clipper n'a pas encore de résultats : son score de départ
-    // est celui de sa candidature, remplacé par ses performances réelles ensuite.
-    const startScore = existing && existing.clipsSubmitted > 0 ? base.score : Math.round(scored.score * 0.6);
-
-    await prisma.clipperProfile.upsert({
-      where: { userId: user.id },
-      create: {
-        userId: user.id,
-        tier: existing?.tier ?? (startScore >= 60 ? "VERIFIED" : "ROOKIE"),
-        score: startScore,
-        scoreBreakdown: base as never,
-        niches: metaArray(dto.metadata, "niches"),
-        languages: metaArray(dto.metadata, "languages").length
-          ? metaArray(dto.metadata, "languages")
-          : ["fr"],
-        tools: metaArray(dto.metadata, "tools"),
-        portfolio: metaArray(dto.metadata, "portfolio"),
-        activeSince: new Date(),
-      },
-      update: {
-        blocked: false,
-        niches: metaArray(dto.metadata, "niches"),
-        tools: metaArray(dto.metadata, "tools"),
-      },
-    });
-    granted = true;
-  }
-
-  // 5. Accès perdu → le profil est bloqué, pas supprimé (on garde l'historique).
-  if (user && !dto.valid) {
-    await prisma.clipperProfile.updateMany({ where: { userId: user.id }, data: { blocked: true } });
-  }
-
   await logEvent({
     stage: "whop",
-    entity: `membership:${dto.id}`,
-    message: `Membership ${dto.status} — candidature ${scored.score}/100 (${scored.decision})${granted ? ", accès clipper accordé" : ""}`,
-    data: { score: scored.score, decision: scored.decision, valid: dto.valid },
+    entity: `client:${client.id}`,
+    message: `${client.name} — abonnement ${dto.status}, qualification ${qualified.score}/100 (${qualified.decision}), ${(qualified.pricePerClipCents / 100).toFixed(0)} €/clip`,
+    data: { decision: qualified.decision, mrrCents, clipsPerMonth },
   });
 
-  return { userId: user?.id ?? null, applicationId: application.id, granted };
+  return { clientId: client.id, decision: qualified.decision, score: qualified.score };
 }
 
-/** Rattrapage complet : relit tous les memberships du produit clippers. */
-export async function syncAllMemberships(): Promise<{ total: number; granted: number; mode: string }> {
+/** Rattrapage complet : relit tous les abonnements du produit de clipping. */
+export async function syncAllMemberships(): Promise<{
+  total: number;
+  toTake: number;
+  mode: string;
+}> {
   const memberships = await whop.listMemberships({ productId: config.whop.productId });
-  let granted = 0;
+  let toTake = 0;
   for (const m of memberships) {
-    const res = await upsertMembership(m);
-    if (res.granted) granted += 1;
+    const res = await upsertClientFromMembership(m);
+    if (res.decision === "prendre") toTake += 1;
   }
   await logEvent({
     stage: "whop",
     entity: "sync:all",
-    message: `Synchro Whop (${whop.mode()}) : ${memberships.length} membership(s), ${granted} accès clipper`,
+    message: `Synchro Whop (${whop.mode()}) : ${memberships.length} abonnement(s), ${toTake} client(s) à prendre`,
   });
-  return { total: memberships.length, granted, mode: whop.mode() };
+  return { total: memberships.length, toTake, mode: whop.mode() };
 }
 
-/** Recalcule le score de tous les clippers depuis leurs résultats réels. */
-export async function recomputeClipperScores(): Promise<number> {
-  const profiles = await prisma.clipperProfile.findMany();
-  for (const p of profiles) {
-    const s = scoreClipper({
-      clipsSubmitted: p.clipsSubmitted,
-      clipsApproved: p.clipsApproved,
-      clipsPublished: p.clipsPublished,
-      totalViews: p.totalViews,
-      onTimeRate: p.onTimeRate,
-      medianTurnaroundH: p.medianTurnaroundH,
-      lastClipAt: p.lastClipAt,
-    });
-    await prisma.clipperProfile.update({
-      where: { id: p.id },
-      data: {
-        score: s.score,
-        tier: s.tier,
-        scoreBreakdown: s as never,
-        approvalRate: p.clipsSubmitted ? (p.clipsApproved / p.clipsSubmitted) * 100 : 0,
-        avgViews: p.clipsPublished ? Math.round(p.totalViews / p.clipsPublished) : 0,
-      },
-    });
-  }
-  return profiles.length;
+/** Remet à zéro les compteurs de clips livrés (début de période). */
+export async function resetMonthlyQuotas(): Promise<number> {
+  const res = await prisma.client.updateMany({
+    where: { status: { in: ["ACTIVE", "TRIAL"] } },
+    data: { clipsDelivered: 0 },
+  });
+  await logEvent({ stage: "whop", entity: "quotas", message: `${res.count} quota(s) remis à zéro` });
+  return res.count;
 }

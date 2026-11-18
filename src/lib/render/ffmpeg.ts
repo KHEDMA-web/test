@@ -8,10 +8,10 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, writeFile, stat, rm } from "node:fs/promises";
+import { mkdir, writeFile, stat, rm, mkdtemp } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { buildAss } from "./ass";
+import { buildAss, remapSegmentsForCuts, type Cut } from "./ass";
 import type { Segment } from "../transcription/types";
 
 const exec = promisify(execFile);
@@ -85,156 +85,192 @@ export async function probeMedia(source: string): Promise<MediaProbe> {
 /** Cadrage vertical : recadrage centré, ou fond flou pour garder le plan large. */
 export type FramingMode = "cover" | "fit-blur" | "fit-bars";
 
-export type RenderRecipe = {
-  startSec: number;
-  endSec: number;
-  hook?: string | null;
-  framing?: FramingMode;
-  width?: number;
-  height?: number;
-  burnSubtitles?: boolean;
-  /** Normalisation du volume pour les réseaux (EBU R128, cible -14 LUFS). */
-  normalizeAudio?: boolean;
-  fps?: number;
-  crf?: number;
-  /** Le rush a-t-il une piste audio ? Sans audio, on n'applique ni loudnorm ni mapping. */
-  hasAudio?: boolean;
-};
-
 export type RenderResult = {
   outputPath: string;
   thumbnailPath: string | null;
   durationSec: number;
   sizeBytes: number;
   command: string;
-  recipe: Required<Omit<RenderRecipe, "hook">> & { hook: string | null };
   log: string;
+  cuts: Cut[];
+  recipe: Record<string, unknown>;
 };
 
-function videoFilter(mode: FramingMode, w: number, h: number): string {
-  switch (mode) {
-    case "fit-blur":
-      // Le plan entier reste visible, les bandes sont remplies par un flou de lui-même.
-      return [
-        `[0:v]split=2[bg][fg]`,
-        `[bg]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},gblur=sigma=28,eq=brightness=-0.12[bgb]`,
-        `[fg]scale=${w}:${h}:force_original_aspect_ratio=decrease[fgs]`,
-        `[bgb][fgs]overlay=(W-w)/2:(H-h)/2`,
-      ].join(";");
-    case "fit-bars":
-      return `[0:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:black`;
-    case "cover":
-    default:
-      return `[0:v]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}`;
+/**
+ * Chaîne de filtres qui amène une coupe au format vertical.
+ * Renvoie le fragment de graphe et l'étiquette de sortie.
+ */
+function framingChain(mode: FramingMode, i: number, w: number, h: number, zoom?: number): { graph: string[]; label: string } {
+  const graph: string[] = [];
+  const src = `c${i}`;
+  const trimmed = `${src}t`;
+
+  if (mode === "fit-blur") {
+    // Le plan entier reste visible, les bandes sont remplies par un flou de lui-même.
+    graph.push(`[${trimmed}]split=2[${src}bg][${src}fg]`);
+    graph.push(`[${src}bg]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},gblur=sigma=28,eq=brightness=-0.12[${src}bgb]`);
+    graph.push(`[${src}fg]scale=${w}:${h}:force_original_aspect_ratio=decrease[${src}fgs]`);
+    graph.push(`[${src}bgb][${src}fgs]overlay=(W-w)/2:(H-h)/2[${src}f]`);
+  } else if (mode === "fit-bars") {
+    graph.push(`[${trimmed}]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:black[${src}f]`);
+  } else {
+    graph.push(`[${trimmed}]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}[${src}f]`);
   }
+
+  // Le zoom s'applique après le cadrage : il vaut pour les trois modes.
+  if (zoom && zoom > 1.001) {
+    const z = Math.min(1.5, zoom);
+    graph.push(`[${src}f]scale=iw*${z.toFixed(3)}:ih*${z.toFixed(3)},crop=${w}:${h}[${src}z]`);
+    return { graph, label: `${src}z` };
+  }
+  return { graph, label: `${src}f` };
 }
 
-/** Échappe un chemin pour l'option `filename` du filtre `subtitles`. */
+/** Échappe un chemin pour l'option `filename` du filtre `ass`. */
 function escapeFilterPath(p: string): string {
   return p.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'").replace(/,/g, "\\,");
 }
 
-/**
- * Rend un clip vertical à partir d'un rush.
- * `segments` sert aux sous-titres : leurs temps sont absolus dans le rush.
- */
-export async function renderClip(args: {
+export type MultiCutRender = {
   source: string;
   outputPath: string;
-  recipe: RenderRecipe;
+  cuts: Cut[];
+  /** Segments du rush, en temps absolus : remappés sur la sortie pour les sous-titres. */
   segments?: Segment[];
+  /** Sous-titres imposés, déjà exprimés en temps de sortie. */
+  captionOverrides?: Array<{ start: number; end: number; text: string }>;
+  hook?: string | null;
+  framing?: FramingMode;
+  burnSubtitles?: boolean;
+  normalizeAudio?: boolean;
+  hasAudio?: boolean;
+  width?: number;
+  height?: number;
+  fps?: number;
+  crf?: number;
   thumbnail?: boolean;
-}): Promise<RenderResult> {
-  const w = args.recipe.width ?? 1080;
-  const h = args.recipe.height ?? 1920;
-  const fps = args.recipe.fps ?? 30;
-  const crf = args.recipe.crf ?? 20;
-  const framing = args.recipe.framing ?? "cover";
-  const burn = args.recipe.burnSubtitles ?? true;
-  const normalize = args.recipe.normalizeAudio ?? true;
-  const duration = Math.max(0.5, args.recipe.endSec - args.recipe.startSec);
+};
+
+/**
+ * Exécute un plan de montage : découpe, recolle, cadre en 9:16, incruste
+ * les sous-titres et le hook, normalise l'audio. Une seule passe FFmpeg.
+ */
+export async function renderMultiCut(args: MultiCutRender): Promise<RenderResult> {
+  const w = args.width ?? 1080;
+  const h = args.height ?? 1920;
+  const fps = args.fps ?? 30;
+  const crf = args.crf ?? 20;
+  const framing = args.framing ?? "cover";
+  const burn = args.burnSubtitles ?? true;
+  const normalize = args.normalizeAudio ?? true;
+  const hasAudio = args.hasAudio ?? true;
+
+  const cuts = args.cuts.filter((c) => c.end > c.start);
+  if (cuts.length === 0) throw new Error("Aucune coupe à rendre.");
+  const totalDuration = cuts.reduce((s, c) => s + (c.end - c.start), 0);
 
   await mkdir(path.dirname(args.outputPath), { recursive: true });
-  const workDir = await import("node:fs/promises").then((fs) =>
-    fs.mkdtemp(path.join(os.tmpdir(), "clipflow-render-")),
-  );
+  const workDir = await mkdtemp(path.join(os.tmpdir(), "clipflow-render-"));
 
   try {
-    const filters = [videoFilter(framing, w, h)];
+    const graph: string[] = [];
+    const videoLabels: string[] = [];
+    const audioLabels: string[] = [];
 
-    // Sous-titres et hook : un seul fichier ASS, un seul filtre.
-    const needsAss = burn || Boolean(args.recipe.hook);
+    for (const [i, cut] of cuts.entries()) {
+      graph.push(`[0:v]trim=start=${cut.start.toFixed(3)}:end=${cut.end.toFixed(3)},setpts=PTS-STARTPTS[c${i}t]`);
+      const { graph: frame, label } = framingChain(framing, i, w, h, cut.zoom);
+      graph.push(...frame);
+      // `concat` exige un ratio de pixel identique sur toutes ses entrées ;
+      // un zoom le modifie légèrement, d'où la normalisation explicite.
+      graph.push(`[${label}]setsar=1,format=yuv420p[v${i}]`);
+      videoLabels.push(`v${i}`);
+
+      if (hasAudio) {
+        graph.push(`[0:a]atrim=start=${cut.start.toFixed(3)}:end=${cut.end.toFixed(3)},asetpts=PTS-STARTPTS[c${i}a]`);
+        audioLabels.push(`c${i}a`);
+      }
+    }
+
+    // Recollage des coupes dans l'ordre donné par le plan.
+    const concatInputs = hasAudio
+      ? videoLabels.map((v, i) => `[${v}][${audioLabels[i]}]`).join("")
+      : videoLabels.map((v) => `[${v}]`).join("");
+    graph.push(
+      `${concatInputs}concat=n=${cuts.length}:v=1:a=${hasAudio ? 1 : 0}${hasAudio ? "[vc][ac]" : "[vc]"}`,
+    );
+
+    // Sous-titres : les temps du rush sont projetés sur la timeline montée.
+    const needsAss = burn || Boolean(args.hook) || Boolean(args.captionOverrides?.length);
+    let videoTail = "vc";
     if (needsAss) {
+      const remapped = burn ? remapSegmentsForCuts(args.segments ?? [], cuts) : [];
+      const overrides: Segment[] = (args.captionOverrides ?? []).map((o, i) => ({
+        idx: 10_000 + i,
+        startSec: o.start,
+        endSec: o.end,
+        text: o.text,
+      }));
+
       const ass = buildAss({
-        segments: burn ? (args.segments ?? []) : [],
-        clipStartSec: args.recipe.startSec,
-        clipEndSec: args.recipe.endSec,
-        hook: args.recipe.hook ?? null,
+        // Les segments sont déjà en temps de sortie : la fenêtre part de 0.
+        segments: [...remapped, ...overrides],
+        clipStartSec: 0,
+        clipEndSec: totalDuration,
+        hook: args.hook ?? null,
         style: { width: w, height: h },
       });
       const assPath = path.join(workDir, "subs.ass");
       await writeFile(assPath, ass, "utf8");
-      filters.push(
-        `ass=filename='${escapeFilterPath(assPath)}':fontsdir='${escapeFilterPath("/usr/share/fonts")}'`,
+      graph.push(
+        `[vc]ass=filename='${escapeFilterPath(assPath)}':fontsdir='${escapeFilterPath("/usr/share/fonts")}'[vs]`,
       );
+      videoTail = "vs";
     }
 
-    filters.push(`fps=${fps}`, "format=yuv420p");
-
-    // Chaînage du graphe : le premier maillon consomme [0:v], le dernier
-    // est étiqueté [vout] pour être mappé explicitement.
-    const filterComplex =
-      filters.reduce((acc, f, i) => (i === 0 ? f : `${acc}[v${i - 1}];[v${i - 1}]${f}`), "") +
-      "[vout]";
-
-    const hasAudio = args.recipe.hasAudio ?? true;
+    graph.push(`[${videoTail}]fps=${fps},format=yuv420p[vout]`);
+    if (hasAudio && normalize) {
+      // Cible -14 LUFS : le niveau attendu par les plateformes sociales.
+      graph.push(`[ac]loudnorm=I=-14:TP=-1.5:LRA=11[aout]`);
+    }
 
     const ffArgs = [
       "-hide_banner",
       "-y",
-      // Recherche avant -i : rapide, et suffisamment précise puisqu'on réencode.
-      "-ss", args.recipe.startSec.toFixed(3),
-      "-t", duration.toFixed(3),
       "-i", args.source,
-      "-filter_complex", filterComplex,
+      "-filter_complex", graph.join(";"),
       "-map", "[vout]",
-      // `?` : un rush muet ne fait pas échouer le rendu.
-      ...(hasAudio ? ["-map", "0:a?"] : ["-an"]),
+      ...(hasAudio ? ["-map", normalize ? "[aout]" : "[ac]"] : ["-an"]),
       "-c:v", "libx264",
       "-preset", "veryfast",
       "-crf", String(crf),
       "-profile:v", "high",
       "-pix_fmt", "yuv420p",
       "-movflags", "+faststart",
-      ...(hasAudio
-        ? [
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-ar", "48000",
-            // Cible -14 LUFS : le niveau attendu par les plateformes sociales.
-            ...(normalize ? ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"] : []),
-          ]
-        : []),
-      "-shortest",
+      ...(hasAudio ? ["-c:a", "aac", "-b:a", "128k", "-ar", "48000"] : []),
       args.outputPath,
     ];
 
     const { stderr } = await exec("ffmpeg", ffArgs, {
       maxBuffer: 1024 * 1024 * 32,
-      timeout: 1000 * 60 * 20,
+      timeout: 1000 * 60 * 25,
     });
 
     let thumbnailPath: string | null = null;
     if (args.thumbnail !== false) {
       thumbnailPath = args.outputPath.replace(/\.\w+$/, "") + ".jpg";
-      await exec("ffmpeg", [
-        "-hide_banner", "-y",
-        "-ss", Math.min(1.2, duration / 2).toFixed(2),
-        "-i", args.outputPath,
-        "-frames:v", "1",
-        "-q:v", "3",
-        thumbnailPath,
-      ], { maxBuffer: 1024 * 1024 * 8 });
+      await exec(
+        "ffmpeg",
+        [
+          "-hide_banner", "-y",
+          "-ss", Math.min(1.2, totalDuration / 2).toFixed(2),
+          "-i", args.outputPath,
+          "-frames:v", "1",
+          "-q:v", "3",
+          thumbnailPath,
+        ],
+        { maxBuffer: 1024 * 1024 * 8 },
+      );
     }
 
     const out = await stat(args.outputPath);
@@ -242,23 +278,24 @@ export async function renderClip(args: {
     return {
       outputPath: args.outputPath,
       thumbnailPath,
-      durationSec: duration,
+      durationSec: totalDuration,
       sizeBytes: out.size,
       command: ["ffmpeg", ...ffArgs].join(" "),
+      log: stderr.slice(-4000),
+      cuts,
       recipe: {
-        startSec: args.recipe.startSec,
-        endSec: args.recipe.endSec,
-        hook: args.recipe.hook ?? null,
+        cuts: cuts.length,
+        totalDuration: Number(totalDuration.toFixed(2)),
         framing,
         width: w,
         height: h,
-        burnSubtitles: burn,
-        normalizeAudio: normalize,
         fps,
         crf,
+        burnSubtitles: burn,
+        normalizeAudio: normalize && hasAudio,
         hasAudio,
+        hook: args.hook ?? null,
       },
-      log: stderr.slice(-4000),
     };
   } finally {
     await rm(workDir, { recursive: true, force: true });

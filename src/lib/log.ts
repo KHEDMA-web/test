@@ -6,6 +6,8 @@ export type Stage =
   | "transcribe"
   | "detect"
   | "hook"
+  | "brief"
+  | "plan"
   | "render"
   | "review"
   | "publish";

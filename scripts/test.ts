@@ -5,7 +5,9 @@
  *   npm test
  */
 import crypto from "node:crypto";
-import { scoreApplication, scoreClipper, matchClipperToRush } from "../src/lib/whop/recruiting";
+import { qualifyClient, productionPriority, MIN_VIABLE_PRICE_PER_CLIP_CENTS } from "../src/lib/whop/qualify";
+import { extractJsonBlock, parsePlanInput, validateClip } from "../src/lib/pipeline/editPlan";
+import { remapSegmentsForCuts } from "../src/lib/render/ass";
 import { verifyWhopWebhook, signPayload, WebhookVerificationError } from "../src/lib/whop/webhook";
 import { detectMoments } from "../src/lib/pipeline/moments";
 import { generateHeuristicHooks, scoreHook } from "../src/lib/pipeline/hooks";
@@ -57,62 +59,98 @@ function eq<T>(actual: T, expected: T, msg?: string) {
 }
 
 async function main() {
-  console.log("\n── Étage 1 · scoring des candidatures ──");
+  console.log("\n── Étage 1 · qualification des clients ──");
 
-  check("un dossier solide passe au-dessus du seuil d'acceptation", () => {
-    const r = scoreApplication({
-      portfolioUrls: ["a", "b", "c", "d"],
-      pastClipViews: 4_200_000,
-      followerCount: 56_000,
-      editingTools: ["CapCut", "Premiere Pro", "After Effects"],
-      niches: ["business", "podcast"],
-      membershipStatus: "active",
-      membershipValid: true,
-      demandNiches: ["business", "tech"],
-    });
+  const goodClient = {
+    mrrCents: 149_000,
+    clipsPerMonth: 20,
+    backCatalogHours: 120,
+    sourcing: "CLIENT_PROVIDED" as const,
+    audienceSize: 310_000,
+    pastClipViews: 4_800_000,
+    brief: "Podcast business hebdomadaire, épisodes de 90 minutes, clips qui tiennent seuls.",
+    hookGuidelines: "Pas de majuscules criées, privilégier les chiffres.",
+    niches: ["business", "podcast"],
+    targetNetworks: ["instagram", "tiktok"],
+    membershipStatus: "active",
+    membershipValid: true,
+    myNiches: ["business", "podcast"],
+  };
+
+  check("un bon client est pris", () => {
+    const r = qualifyClient(goodClient);
     assert(r.score >= 70, `score trop bas : ${r.score}`);
-    eq(r.decision, "accept");
+    eq(r.decision, "prendre");
   });
 
-  check("un dossier vide est écarté", () => {
-    const r = scoreApplication({ portfolioUrls: [], membershipStatus: "past_due", membershipValid: false });
-    assert(r.score < 45, `score trop haut : ${r.score}`);
-    eq(r.decision, "reject");
-  });
-
-  check("le score reste borné à 100 et la somme des critères est cohérente", () => {
-    const r = scoreApplication({
-      portfolioUrls: Array(50).fill("x"),
-      pastClipViews: 999_000_000,
-      followerCount: 9_000_000,
-      editingTools: ["Premiere Pro", "After Effects", "DaVinci Resolve", "Final Cut Pro"],
-      niches: ["business"],
-      membershipValid: true,
-      membershipStatus: "active",
-      demandNiches: ["business"],
+  check("le volume à bas prix est refusé, même avec un bon dossier", () => {
+    // Beaucoup de matière, grosse audience, mais 10 € le clip.
+    const r = qualifyClient({
+      ...goodClient,
+      mrrCents: 39_000,
+      clipsPerMonth: 40,
+      backCatalogHours: 200,
+      audienceSize: 95_000,
     });
+    eq(r.decision, "refuser", `décision ${r.decision} pour ${(r.pricePerClipCents / 100).toFixed(2)} €/clip`);
+    assert(
+      r.pricePerClipCents < MIN_VIABLE_PRICE_PER_CLIP_CENTS,
+      "le prix par clip doit être sous le seuil de viabilité",
+    );
+    assert(r.summary.includes("par clip"), "le motif doit nommer le prix par clip");
+  });
+
+  check("un client qui fournit ses rushes vaut mieux qu'un client à sourcer", () => {
+    const provided = qualifyClient({ ...goodClient, sourcing: "CLIENT_PROVIDED" });
+    const sourced = qualifyClient({ ...goodClient, sourcing: "SELF_SOURCED" });
+    const p = provided.components.find((c) => c.key === "material")!.points;
+    const sc = sourced.components.find((c) => c.key === "material")!.points;
+    assert(p > sc, `${p} devrait dépasser ${sc} : aller chercher la matière est du travail en plus`);
+  });
+
+  check("un abonnement impayé ne donne pas de points de paiement", () => {
+    const r = qualifyClient({ ...goodClient, membershipValid: false, membershipStatus: "past_due" });
+    const pay = r.components.find((c) => c.key === "payment")!;
+    assert(pay.points < 10, "un impayé ne doit pas valoir le maximum");
+    assert(pay.note?.includes("ne pas commencer") ?? false, "le risque doit être explicite");
+  });
+
+  check("les scores restent bornés et chaque critère respecte son maximum", () => {
+    const r = qualifyClient({ ...goodClient, mrrCents: 50_000_000, audienceSize: 90_000_000 });
     assert(r.score <= 100, `score hors borne : ${r.score}`);
-    const sum = r.components.reduce((s, c) => s + c.points, 0);
-    assert(sum >= r.score, "la somme des critères doit porter le score");
     for (const c of r.components) assert(c.points <= c.max, `${c.key} dépasse son maximum`);
   });
 
-  check("un faible volume de clips bride le taux de validation", () => {
-    const few = scoreClipper({ clipsSubmitted: 2, clipsApproved: 2, clipsPublished: 2, totalViews: 1000, onTimeRate: 100, medianTurnaroundH: 5, lastClipAt: new Date() });
-    const many = scoreClipper({ clipsSubmitted: 40, clipsApproved: 40, clipsPublished: 40, totalViews: 20_000, onTimeRate: 100, medianTurnaroundH: 5, lastClipAt: new Date() });
-    const fewApproval = few.components.find((c) => c.key === "approval")!.points;
-    const manyApproval = many.components.find((c) => c.key === "approval")!.points;
-    assert(fewApproval < manyApproval, "un échantillon de 2 clips ne doit pas valoir 100 % de confiance");
+  check("le retard d'échéance passe devant tout le reste", () => {
+    const late = productionPriority({
+      score: 50,
+      clipsPerMonth: 10,
+      clipsDelivered: 9,
+      mrrCents: 29_000,
+      nextDueAt: new Date(Date.now() - 6 * 3600_000),
+      status: "ACTIVE",
+    });
+    const rich = productionPriority({
+      score: 95,
+      clipsPerMonth: 20,
+      clipsDelivered: 0,
+      mrrCents: 200_000,
+      nextDueAt: new Date(Date.now() + 10 * 864e5),
+      status: "ACTIVE",
+    });
+    assert(late.priority > rich.priority, `${late.priority} devrait dépasser ${rich.priority}`);
+    assert(late.reason.includes("retard"), "le motif doit dire le retard");
   });
 
-  check("un clipper saturé n'est pas proposé", () => {
-    const m = matchClipperToRush({
-      clipper: { id: "x", name: "Test", score: 90, tier: "ELITE", niches: ["business"], languages: ["fr"], openAssignments: 3, medianTurnaroundH: 4 },
-      campaign: { targetNiches: ["business"], language: "fr" },
-      capacity: 3,
+  check("un quota déjà livré retombe en bas de la file", () => {
+    const done = productionPriority({
+      score: 90,
+      clipsPerMonth: 8,
+      clipsDelivered: 8,
+      mrrCents: 100_000,
+      status: "ACTIVE",
     });
-    eq(m.components.find((c) => c.key === "capacity")!.points, 0);
-    assert(m.reason.includes("saturé"), "la raison doit expliquer la saturation");
+    assert(done.priority <= 5, `priorité ${done.priority} trop haute pour un quota terminé`);
   });
 
   console.log("\n── Étage 1 · webhook Whop (Standard Webhooks) ──");
@@ -291,7 +329,101 @@ async function main() {
     assert(!topics.includes("construis"), `forme verbale retenue : ${topics.join(", ")}`);
   });
 
-  console.log("\n── Étage 4 · montage ──");
+  console.log("\n── Étage 4 · lecture du plan de Claude ──");
+
+  check("le JSON est extrait d'une réponse entourée de prose", () => {
+    const raw = "Voici mes deux clips, j'ai privilégié la chute.\n\n```json\n{\"clips\":[{\"cuts\":[{\"start\":1,\"end\":20}]}]}\n```\n\nDis-moi si tu veux autre chose.";
+    const json = extractJsonBlock(raw);
+    assert(json !== null, "aucun bloc extrait");
+    const parsed = parsePlanInput(raw);
+    assert(parsed.ok, `échec : ${parsed.issues.map((i) => i.message).join(", ")}`);
+    eq(parsed.clips.length, 1);
+  });
+
+  check("les accolades imbriquées ne cassent pas l'extraction", () => {
+    const raw = '{"clips":[{"cuts":[{"start":1,"end":20}],"captionOverrides":[{"start":0,"end":2,"text":"a}b"}]}]}';
+    const parsed = parsePlanInput(raw);
+    assert(parsed.ok, `échec : ${parsed.issues.map((i) => i.message).join(", ")}`);
+    eq(parsed.clips[0].captionOverrides?.[0].text, "a}b");
+  });
+
+  check("un plan unique sans tableau `clips` est accepté", () => {
+    const parsed = parsePlanInput('{"title":"Un clip","cuts":[{"start":5,"end":30}]}');
+    assert(parsed.ok, "le plan unique doit passer");
+    eq(parsed.clips[0].title, "Un clip");
+  });
+
+  check("les timecodes en mm:ss sont convertis en secondes", () => {
+    const parsed = parsePlanInput('{"clips":[{"cuts":[{"start":"1:31.5","end":"2:11"}]}]}');
+    assert(parsed.ok, "la conversion doit réussir");
+    eq(parsed.clips[0].cuts[0].start, 91.5);
+    eq(parsed.clips[0].cuts[0].end, 131);
+  });
+
+  check("une réponse sans JSON est refusée avec un message actionnable", () => {
+    const parsed = parsePlanInput("Je pense qu'il faut couper vers une minute trente.");
+    assert(!parsed.ok, "aucun plan ne devrait être lu");
+    assert(parsed.issues[0].message.includes("Aucun bloc JSON"), parsed.issues[0].message);
+  });
+
+  check("une coupe sans `end` est signalée précisément", () => {
+    const parsed = parsePlanInput('{"clips":[{"cuts":[{"start":10}]}]}');
+    assert(!parsed.ok, "le plan ne doit pas passer");
+    assert(
+      parsed.issues.some((i) => i.message.includes("`start` et `end`")),
+      parsed.issues.map((i) => i.message).join(" | "),
+    );
+  });
+
+  const planCtx = {
+    durationSec: 240,
+    minClipSeconds: 18,
+    maxClipSeconds: 60,
+    segmentBoundaries: [0, 12.4, 30.1, 48.9, 61.2, 95.6, 120.0],
+  };
+
+  check("une coupe au-delà du rush est tronquée, pas rejetée", () => {
+    const v = validateClip({ cuts: [{ start: 200, end: 300 }], hook: "Un hook correct" }, planCtx);
+    eq(v.cuts[0].end, 240);
+    assert(v.issues.some((i) => i.level === "warning" && i.message.includes("au-delà")), "le recadrage doit être signalé");
+    assert(!v.issues.some((i) => i.level === "error"), "ce n'est pas une erreur bloquante");
+  });
+
+  check("une coupe inversée est une erreur", () => {
+    const v = validateClip({ cuts: [{ start: 60, end: 30 }] }, planCtx);
+    assert(v.issues.some((i) => i.level === "error"), "une fin avant le début doit bloquer");
+  });
+
+  check("les coupes sont recalées sur la parole", () => {
+    const v = validateClip({ cuts: [{ start: 30.2, end: 61.0 }], hook: "Un hook correct" }, planCtx);
+    eq(v.cuts[0].start, 30.1);
+    eq(v.cuts[0].end, 61.2);
+    assert(v.issues.some((i) => i.message.includes("recalée")), "le recalage doit être dit");
+  });
+
+  check("un chevauchement entre deux coupes est signalé", () => {
+    const v = validateClip(
+      { cuts: [{ start: 0, end: 48.9 }, { start: 30.1, end: 95.6 }], hook: "Un hook correct" },
+      planCtx,
+    );
+    assert(v.issues.some((i) => i.message.includes("chevauchent")), "le passage vu deux fois doit alerter");
+  });
+
+  check("la durée hors bornes est un avertissement, pas un blocage", () => {
+    const v = validateClip({ cuts: [{ start: 0, end: 12.4 }], hook: "Un hook correct" }, planCtx);
+    assert(v.issues.some((i) => i.level === "warning" && i.message.includes("minimum")), "trop court doit alerter");
+    assert(!v.issues.some((i) => i.level === "error"), "mais rester rendable");
+  });
+
+  check("un hook trop long pour l'écran est signalé", () => {
+    const v = validateClip(
+      { cuts: [{ start: 0, end: 48.9 }], hook: "x".repeat(80) },
+      planCtx,
+    );
+    assert(v.issues.some((i) => i.message.includes("débordera")), "les 58 caractères doivent être rappelés");
+  });
+
+  console.log("\n── Étage 4 · rendu et sous-titres ──");
 
   check("le contrôle qualité repère un format non vertical", () => {
     const r = qaCheck({ durationSec: 30, hook: "Un hook correct ici", width: 1920, height: 1080, minSeconds: 15, maxSeconds: 60 });
@@ -308,6 +440,39 @@ async function main() {
     const r = qaCheck({ durationSec: 32, hook: "Ce que personne ne te dit", width: 1080, height: 1920, minSeconds: 15, maxSeconds: 60 });
     eq(r.score, 100);
     eq(r.issues, []);
+  });
+
+  check("les sous-titres suivent les coupes dans l'ordre du montage", () => {
+    const segments = [
+      { idx: 0, startSec: 10, endSec: 14, text: "premier", words: [{ text: "premier", start: 10, end: 14 }] },
+      { idx: 1, startSec: 50, endSec: 54, text: "second", words: [{ text: "second", start: 50, end: 54 }] },
+    ];
+    // La deuxième coupe est prise AVANT la première dans le rush, mais
+    // placée après dans le montage : l'ordre du plan doit primer.
+    const out = remapSegmentsForCuts(segments, [
+      { start: 48, end: 56 },
+      { start: 8, end: 16 },
+    ]);
+    eq(out.length, 2);
+    eq(out[0].text, "second");
+    eq(out[0].startSec, 2);
+    eq(out[1].text, "premier");
+    // 8 s de première coupe, puis 10-8 = 2 s dans la seconde.
+    eq(out[1].startSec, 10);
+    eq(out[1].words?.[0].start, 10);
+  });
+
+  check("un segment à cheval sur une coupe est tronqué à la coupe", () => {
+    const segments = [{ idx: 0, startSec: 18, endSec: 26, text: "à cheval" }];
+    const out = remapSegmentsForCuts(segments, [{ start: 20, end: 24 }]);
+    eq(out.length, 1);
+    eq(out[0].startSec, 0);
+    eq(out[0].endSec, 4);
+  });
+
+  check("un segment hors de toutes les coupes disparaît", () => {
+    const segments = [{ idx: 0, startSec: 100, endSec: 108, text: "coupé au montage" }];
+    eq(remapSegmentsForCuts(segments, [{ start: 0, end: 20 }]).length, 0);
   });
 
   check("les sous-titres sont découpés en groupes lisibles", () => {

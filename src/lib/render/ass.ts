@@ -128,3 +128,54 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
   return header + events.join("\n") + "\n";
 }
+
+export type Cut = { start: number; end: number; zoom?: number; note?: string };
+
+/**
+ * Projette les segments du rush sur la timeline du clip monté.
+ *
+ * Un montage à plusieurs coupes recolle des morceaux non contigus : un mot
+ * prononcé à 2:31 dans le rush peut se retrouver à 0:12 dans le clip. Sans
+ * ce remappage, les sous-titres défileraient sur les mauvaises images.
+ */
+export function remapSegmentsForCuts(segments: Segment[], cuts: Cut[]): Segment[] {
+  const out: Segment[] = [];
+  let offset = 0;
+  let idx = 0;
+
+  for (const cut of cuts) {
+    const cutDuration = cut.end - cut.start;
+
+    for (const seg of segments) {
+      if (seg.endSec <= cut.start || seg.startSec >= cut.end) continue;
+
+      const start = Math.max(seg.startSec, cut.start) - cut.start + offset;
+      const end = Math.min(seg.endSec, cut.end) - cut.start + offset;
+      if (end - start < 0.08) continue;
+
+      const words = (seg.words ?? [])
+        .filter((w) => w.end > cut.start && w.start < cut.end)
+        .map((w) => ({
+          text: w.text,
+          start: Math.max(w.start, cut.start) - cut.start + offset,
+          end: Math.min(w.end, cut.end) - cut.start + offset,
+          confidence: w.confidence,
+        }))
+        .filter((w) => w.end > w.start);
+
+      out.push({
+        idx: idx++,
+        startSec: Number(start.toFixed(3)),
+        endSec: Number(end.toFixed(3)),
+        text: seg.text,
+        speaker: seg.speaker,
+        confidence: seg.confidence,
+        words: words.length ? words : undefined,
+      });
+    }
+
+    offset += cutDuration;
+  }
+
+  return out;
+}

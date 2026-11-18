@@ -15,7 +15,7 @@ import { config, live } from "@/lib/config";
 import { logEvent } from "@/lib/log";
 import { verifyWhopWebhook, WebhookVerificationError, isMembershipEvent } from "@/lib/whop/webhook";
 import { normalizeMembership } from "@/lib/whop/client";
-import { upsertMembership } from "@/lib/whop/sync";
+import { upsertClientFromMembership } from "@/lib/whop/sync";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,7 +67,7 @@ export async function POST(req: Request) {
   try {
     if (isMembershipEvent(envelope.type)) {
       const dto = normalizeMembership(envelope.data as Record<string, unknown>);
-      await upsertMembership(dto);
+      await upsertClientFromMembership(dto);
     } else {
       await logEvent({
         stage: "whop",

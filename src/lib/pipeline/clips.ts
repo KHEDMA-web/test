@@ -1,25 +1,20 @@
 /**
- * Étage 4 — montage hybride.
+ * Étage 4c — exécuter un plan de montage.
  *
- * Deux chemins aboutissent au même objet `Clip` :
- *   - `renderAutoDraft` : la plateforme découpe, recadre, incruste le hook
- *     et les sous-titres. Le résultat est un brouillon (`origin: AUTO`).
- *   - `submitClipperVersion` : le clipper dépose sa propre version, qui crée
- *     une nouvelle révision (`origin: CLIPPER`) liée à la précédente.
- *
- * Le brouillon auto n'est jamais écrasé : il reste consultable comme
- * référence, et la comparaison des deux versions nourrit le score du clipper.
+ * Un plan est une décision éditoriale ; un clip est son exécution. Les deux
+ * sont séparés pour qu'on puisse rejouer un rendu, comparer deux versions
+ * d'un même montage, ou corriger un plan sans tout refaire.
  */
-import path from "node:path";
 import { prisma } from "../db";
 import { logEvent } from "../log";
-import { renderClip } from "../render/ffmpeg";
+import { renderMultiCut, type FramingMode } from "../render/ffmpeg";
 import { publicUrlFor, storagePath, ensureStorage } from "../storage";
 import type { Segment } from "../transcription/types";
 import type { Clip, ClipStatus } from "@prisma/client";
-import { scoreClipper } from "../whop/recruiting";
 
-/** Contrôle qualité automatique d'un clip, avant review humaine. */
+export type PlanCut = { start: number; end: number; note?: string; zoom?: number };
+
+/** Contrôle qualité automatique, avant ma relecture. */
 export function qaCheck(args: {
   durationSec: number;
   hook?: string | null;
@@ -27,6 +22,7 @@ export function qaCheck(args: {
   height?: number | null;
   minSeconds: number;
   maxSeconds: number;
+  cutCount?: number;
 }): { score: number; issues: string[] } {
   const issues: string[] = [];
   let score = 100;
@@ -42,7 +38,7 @@ export function qaCheck(args: {
   if (!args.hook || args.hook.trim().length < 8) {
     issues.push("Pas de hook lisible sur la première seconde");
     score -= 30;
-  } else if (args.hook.length > 70) {
+  } else if (args.hook.length > 58) {
     issues.push(`Hook trop long pour l'écran (${args.hook.length} caractères)`);
     score -= 10;
   }
@@ -53,10 +49,25 @@ export function qaCheck(args: {
       score -= 25;
     }
   }
+  // Un montage d'une seule coupe sur un rush long est souvent un extrait brut.
+  if (args.cutCount === 1 && args.durationSec > 45) {
+    issues.push("Une seule coupe sur un clip long : vérifier qu'il n'y a pas de temps mort");
+    score -= 5;
+  }
   return { score: Math.max(0, score), issues };
 }
 
-function segmentsOf(rows: Array<{ idx: number; startSec: number; endSec: number; text: string; speaker: string | null; confidence: number | null; words: unknown }>): Segment[] {
+function segmentsOf(
+  rows: Array<{
+    idx: number;
+    startSec: number;
+    endSec: number;
+    text: string;
+    speaker: string | null;
+    confidence: number | null;
+    words: unknown;
+  }>,
+): Segment[] {
   return rows.map((r) => ({
     idx: r.idx,
     startSec: r.startSec,
@@ -68,77 +79,62 @@ function segmentsOf(rows: Array<{ idx: number; startSec: number; endSec: number;
   }));
 }
 
-export type AutoDraftOptions = {
-  hookId?: string;
-  framing?: "cover" | "fit-blur" | "fit-bars";
-  burnSubtitles?: boolean;
-  assignmentId?: string;
-  clipperId?: string;
-};
-
-/** Rend le brouillon automatique d'un moment. */
-export async function renderAutoDraft(momentId: string, opts: AutoDraftOptions = {}): Promise<Clip> {
-  const moment = await prisma.moment.findUniqueOrThrow({
-    where: { id: momentId },
-    include: {
-      rush: { include: { campaign: true } },
-      hooks: { orderBy: { score: "desc" } },
-    },
+/** Exécute un plan : rend la vidéo et crée le clip correspondant. */
+export async function renderPlan(planId: string): Promise<Clip> {
+  const plan = await prisma.editPlan.findUniqueOrThrow({
+    where: { id: planId },
+    include: { rush: { include: { client: true } } },
   });
 
-  const source = moment.rush.filePath ?? moment.rush.sourceUrl;
+  const source = plan.rush.filePath ?? plan.rush.sourceUrl;
   if (!source) throw new Error("Rush sans fichier source : rendu impossible.");
 
-  const hook = opts.hookId
-    ? moment.hooks.find((h) => h.id === opts.hookId)
-    : (moment.hooks.find((h) => h.selected) ?? moment.hooks[0]);
+  const cuts = plan.cuts as unknown as PlanCut[];
+  if (!Array.isArray(cuts) || cuts.length === 0) throw new Error("Plan sans coupe exploitable.");
+
+  await prisma.editPlan.update({ where: { id: plan.id }, data: { status: "RENDERING", error: null } });
 
   const clip = await prisma.clip.create({
     data: {
-      rushId: moment.rushId,
-      campaignId: moment.rush.campaignId,
-      momentId: moment.id,
-      hookId: hook?.id ?? null,
-      clipperId: opts.clipperId ?? null,
-      assignmentId: opts.assignmentId ?? null,
-      title: hook?.text ?? `${moment.rush.title} — ${Math.round(moment.startSec)}s`,
-      caption: hook?.text ?? null,
-      origin: "AUTO",
+      rushId: plan.rushId,
+      clientId: plan.clientId,
+      momentId: plan.momentId,
+      editPlanId: plan.id,
+      title: plan.title,
+      caption: plan.caption,
+      hashtags: plan.hashtags,
       status: "RENDERING",
-      startSec: moment.startSec,
-      endSec: moment.endSec,
     },
   });
 
   try {
     await ensureStorage();
     const rows = await prisma.transcriptSegment.findMany({
-      where: { rushId: moment.rushId },
+      where: { rushId: plan.rushId },
       orderBy: { idx: "asc" },
     });
 
-    const outputPath = storagePath("clip", `${clip.id}.mp4`);
-    const result = await renderClip({
+    const result = await renderMultiCut({
       source,
-      outputPath,
+      outputPath: storagePath("clip", `${clip.id}.mp4`),
+      cuts: cuts.map((c) => ({ start: c.start, end: c.end, zoom: c.zoom, note: c.note })),
       segments: segmentsOf(rows),
-      recipe: {
-        startSec: moment.startSec,
-        endSec: moment.endSec,
-        hook: hook?.text ?? null,
-        framing: opts.framing ?? (moment.rush.width && moment.rush.height && moment.rush.width > moment.rush.height ? "fit-blur" : "cover"),
-        burnSubtitles: opts.burnSubtitles ?? true,
-        hasAudio: moment.rush.hasAudio,
-      },
+      captionOverrides: (plan.captionOverrides as unknown as Array<{ start: number; end: number; text: string }>) ?? undefined,
+      hook: plan.hook,
+      framing: plan.framing as FramingMode,
+      burnSubtitles: plan.burnSubtitles,
+      normalizeAudio: plan.normalizeAudio,
+      hasAudio: plan.rush.hasAudio,
     });
 
     const qa = qaCheck({
       durationSec: result.durationSec,
-      hook: hook?.text,
-      width: result.recipe.width,
-      height: result.recipe.height,
-      minSeconds: moment.rush.campaign?.minClipSeconds ?? 15,
-      maxSeconds: moment.rush.campaign?.maxClipSeconds ?? 75,
+      hook: plan.hook,
+      width: result.recipe.width as number,
+      height: result.recipe.height as number,
+      minSeconds: plan.rush.client?.minClipSeconds ?? 18,
+      maxSeconds: plan.rush.client?.maxClipSeconds ?? 60,
+      cutCount: cuts.length,
     });
 
     const updated = await prisma.clip.update({
@@ -149,9 +145,10 @@ export async function renderAutoDraft(momentId: string, opts: AutoDraftOptions =
         previewPath: result.thumbnailPath,
         publicUrl: publicUrlFor(result.outputPath),
         durationSec: result.durationSec,
-        width: result.recipe.width,
-        height: result.recipe.height,
+        width: result.recipe.width as number,
+        height: result.recipe.height as number,
         sizeBytes: BigInt(result.sizeBytes),
+        cutsSummary: cuts as never,
         renderRecipe: { ...result.recipe, command: result.command } as never,
         renderLog: result.log,
         qaScore: qa.score,
@@ -159,138 +156,76 @@ export async function renderAutoDraft(momentId: string, opts: AutoDraftOptions =
       },
     });
 
-    await prisma.moment.update({ where: { id: momentId }, data: { status: "CLIPPED" } });
+    await prisma.editPlan.update({ where: { id: plan.id }, data: { status: "RENDERED" } });
+    if (plan.momentId) {
+      await prisma.moment.update({ where: { id: plan.momentId }, data: { status: "CLIPPED" } });
+    }
+
     await logEvent({
       stage: "render",
       entity: `clip:${clip.id}`,
-      message: `Brouillon auto rendu (${result.durationSec.toFixed(1)} s, QA ${qa.score}/100)`,
-      data: { issues: qa.issues },
+      message: `Montage rendu — ${cuts.length} coupe(s), ${result.durationSec.toFixed(1)} s, QA ${qa.score}/100`,
+      data: { plan: plan.id, issues: qa.issues },
     });
 
     return updated;
   } catch (err) {
-    await prisma.clip.update({
-      where: { id: clip.id },
-      data: { status: "FAILED", renderLog: (err as Error).message },
-    });
+    const message = (err as Error).message;
+    await prisma.clip.update({ where: { id: clip.id }, data: { status: "FAILED", renderLog: message } });
+    await prisma.editPlan.update({ where: { id: plan.id }, data: { status: "FAILED", error: message } });
     await logEvent({
       stage: "render",
-      entity: `clip:${clip.id}`,
+      entity: `plan:${plan.id}`,
       level: "error",
-      message: `Rendu échoué : ${(err as Error).message}`,
+      message: `Rendu échoué : ${message}`,
     });
     throw err;
   }
 }
 
 /**
- * Le clipper dépose sa version montée à la main : nouvelle révision,
- * chaînée au brouillon auto qu'elle remplace.
+ * Plan de secours : une coupe unique sur un moment détecté, avec son
+ * meilleur hook. Utile pour dégrossir, ou quand je n'ai pas Claude sous
+ * la main. Le vrai montage reste celui que je fais avec lui.
  */
-export async function submitClipperVersion(args: {
-  baseClipId: string;
-  clipperId: string;
-  filePath: string;
-  title?: string;
-  caption?: string;
-  hashtags?: string[];
-  note?: string;
-}): Promise<Clip> {
-  const base = await prisma.clip.findUniqueOrThrow({
-    where: { id: args.baseClipId },
-    include: { rush: { include: { campaign: true } }, hook: true },
+export async function autoPlanFromMoment(momentId: string, hookId?: string): Promise<string> {
+  const moment = await prisma.moment.findUniqueOrThrow({
+    where: { id: momentId },
+    include: { rush: true, hooks: { orderBy: { score: "desc" } } },
   });
 
-  const { probeMedia } = await import("../render/ffmpeg");
-  const probe = await probeMedia(args.filePath);
+  const hook = hookId ? moment.hooks.find((h) => h.id === hookId) : (moment.hooks.find((h) => h.selected) ?? moment.hooks[0]);
+  const previous = await prisma.editPlan.count({ where: { rushId: moment.rushId } });
 
-  const qa = qaCheck({
-    durationSec: probe.durationSec,
-    hook: base.hook?.text ?? base.caption,
-    width: probe.width,
-    height: probe.height,
-    minSeconds: base.rush.campaign?.minClipSeconds ?? 15,
-    maxSeconds: base.rush.campaign?.maxClipSeconds ?? 75,
-  });
-
-  const clip = await prisma.clip.create({
+  const plan = await prisma.editPlan.create({
     data: {
-      rushId: base.rushId,
-      campaignId: base.campaignId,
-      momentId: base.momentId,
-      hookId: base.hookId,
-      clipperId: args.clipperId,
-      assignmentId: base.assignmentId,
-      title: args.title ?? base.title,
-      caption: args.caption ?? base.caption,
-      hashtags: args.hashtags ?? base.hashtags,
-      origin: "CLIPPER",
-      version: base.version + 1,
-      replacesId: base.id,
-      filePath: args.filePath,
-      publicUrl: publicUrlFor(args.filePath),
-      durationSec: probe.durationSec,
-      width: probe.width,
-      height: probe.height,
-      sizeBytes: probe.sizeBytes ? BigInt(probe.sizeBytes) : null,
-      startSec: base.startSec,
-      endSec: base.endSec,
-      status: "SUBMITTED",
-      submittedAt: new Date(),
-      qaScore: qa.score,
-      qaIssues: qa.issues,
-      renderRecipe: { source: "clipper-upload", file: path.basename(args.filePath), note: args.note } as never,
+      rushId: moment.rushId,
+      clientId: moment.rush.clientId,
+      momentId: moment.id,
+      title: hook?.text ?? `${moment.rush.title} — ${Math.round(moment.startSec)}s`,
+      hook: hook?.text ?? null,
+      caption: hook?.text ?? null,
+      cuts: [{ start: moment.startSec, end: moment.endSec, note: "moment détecté automatiquement" }] as never,
+      framing:
+        moment.rush.width && moment.rush.height && moment.rush.width > moment.rush.height ? "fit-blur" : "cover",
+      source: "AUTO",
+      author: "Détection automatique",
+      rationale: moment.rationale,
+      version: previous + 1,
+      warnings: ["Plan automatique : une seule coupe, aucun travail éditorial."],
     },
   });
 
-  // Le brouillon auto reste en base, marqué comme remplacé.
-  await prisma.clip.update({ where: { id: base.id }, data: { status: "CHANGES_REQUESTED" } });
-
-  const profile = await prisma.clipperProfile.findUnique({ where: { userId: args.clipperId } });
-  if (profile) {
-    const assignment = base.assignmentId
-      ? await prisma.assignment.findUnique({ where: { id: base.assignmentId } })
-      : null;
-    const onTime = assignment?.dueAt ? new Date() <= assignment.dueAt : true;
-    const turnaroundH = assignment
-      ? (Date.now() - assignment.createdAt.getTime()) / 36e5
-      : profile.medianTurnaroundH;
-
-    const submitted = profile.clipsSubmitted + 1;
-    await prisma.clipperProfile.update({
-      where: { id: profile.id },
-      data: {
-        clipsSubmitted: submitted,
-        lastClipAt: new Date(),
-        // Moyenne glissante simple : suffisant et lisible.
-        medianTurnaroundH: Number(
-          ((profile.medianTurnaroundH * profile.clipsSubmitted + turnaroundH) / submitted).toFixed(2),
-        ),
-        onTimeRate: Number(
-          (((profile.onTimeRate / 100) * profile.clipsSubmitted + (onTime ? 1 : 0)) / submitted * 100).toFixed(2),
-        ),
-      },
-    });
-  }
-
-  if (base.assignmentId) {
-    await prisma.assignment.update({
-      where: { id: base.assignmentId },
-      data: { status: "SUBMITTED", submittedAt: new Date() },
-    });
-  }
-
   await logEvent({
-    stage: "render",
-    entity: `clip:${clip.id}`,
-    message: `Version clipper v${clip.version} déposée (QA ${qa.score}/100)`,
-    data: { replaces: base.id, issues: qa.issues },
+    stage: "plan",
+    entity: `plan:${plan.id}`,
+    message: `Plan automatique créé depuis le moment ${Math.round(moment.startSec)}s`,
   });
 
-  return clip;
+  return plan.id;
 }
 
-/** Validation ou refus d'un clip, avec mise à jour du score du clipper. */
+/** Ma relecture : valider, refuser, ou demander une autre version. */
 export async function reviewClip(args: {
   clipId: string;
   reviewerId?: string | null;
@@ -311,45 +246,30 @@ export async function reviewClip(args: {
   });
 
   const status: ClipStatus =
-    args.decision === "APPROVED" ? "APPROVED" : args.decision === "REJECTED" ? "REJECTED" : "CHANGES_REQUESTED";
+    args.decision === "APPROVED" ? "APPROVED" : args.decision === "REJECTED" ? "REJECTED" : "READY";
 
   const updated = await prisma.clip.update({
     where: { id: clip.id },
     data: { status, approvedAt: args.decision === "APPROVED" ? new Date() : null },
   });
 
-  if (clip.clipperId) {
-    const profile = await prisma.clipperProfile.findUnique({ where: { userId: clip.clipperId } });
-    if (profile) {
-      const approved = profile.clipsApproved + (args.decision === "APPROVED" ? 1 : 0);
-      const rejected = profile.clipsRejected + (args.decision === "REJECTED" ? 1 : 0);
-      const recomputed = scoreClipper({
-        clipsSubmitted: profile.clipsSubmitted,
-        clipsApproved: approved,
-        clipsPublished: profile.clipsPublished,
-        totalViews: profile.totalViews,
-        onTimeRate: profile.onTimeRate,
-        medianTurnaroundH: profile.medianTurnaroundH,
-        lastClipAt: profile.lastClipAt,
-      });
-      await prisma.clipperProfile.update({
-        where: { id: profile.id },
-        data: {
-          clipsApproved: approved,
-          clipsRejected: rejected,
-          approvalRate: profile.clipsSubmitted ? (approved / profile.clipsSubmitted) * 100 : 0,
-          score: recomputed.score,
-          tier: recomputed.tier,
-          scoreBreakdown: recomputed as never,
-        },
-      });
-    }
+  // Un clip validé compte dans le quota mensuel du client.
+  if (args.decision === "APPROVED" && clip.clientId) {
+    await prisma.client.update({
+      where: { id: clip.clientId },
+      data: { clipsDelivered: { increment: 1 } },
+    });
   }
 
   await logEvent({
     stage: "review",
     entity: `clip:${clip.id}`,
-    message: `Clip ${args.decision === "APPROVED" ? "validé" : args.decision === "REJECTED" ? "refusé" : "renvoyé pour corrections"}`,
+    message:
+      args.decision === "APPROVED"
+        ? "Clip validé, prêt à programmer"
+        : args.decision === "REJECTED"
+          ? "Clip refusé"
+          : "Clip renvoyé pour une autre version",
     data: { comment: args.comment },
   });
 

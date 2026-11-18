@@ -53,7 +53,7 @@ export type QueueInput = {
 export async function queueClipPublications(input: QueueInput): Promise<Publication[]> {
   const clip = await prisma.clip.findUniqueOrThrow({
     where: { id: input.clipId },
-    include: { campaign: true, hook: true },
+    include: { client: true, hook: true },
   });
 
   if (!["APPROVED", "SCHEDULED", "READY"].includes(clip.status)) {
@@ -66,7 +66,7 @@ export async function queueClipPublications(input: QueueInput): Promise<Publicat
   }
 
   const timezone = input.timezone ?? config.metricool.timezone;
-  const blogId = input.blogId ?? clip.campaign?.metricoolBlogId ?? config.metricool.blogId ?? "";
+  const blogId = input.blogId ?? clip.client?.metricoolBlogId ?? config.metricool.blogId ?? "";
   const baseText = input.text ?? clip.caption ?? clip.hook?.text ?? clip.title;
   const text = [baseText, clip.hashtags.map((h) => (h.startsWith("#") ? h : `#${h}`)).join(" ")]
     .filter(Boolean)
@@ -80,6 +80,7 @@ export async function queueClipPublications(input: QueueInput): Promise<Publicat
     const pub = await prisma.publication.create({
       data: {
         clipId: clip.id,
+        clientId: clip.clientId,
         network,
         blogId,
         text,

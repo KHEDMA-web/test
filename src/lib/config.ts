@@ -106,8 +106,8 @@ export function integrationStatuses(): IntegrationStatus[] {
   return [
     {
       key: "whop",
-      label: "Whop — API (recrutement, memberships)",
-      stage: "1 · Recrutement",
+      label: "Whop — API (abonnements clients)",
+      stage: "1 · Clients",
       mode: live.whop() ? "live" : "mock",
       missing: miss([["WHOP_API_KEY", config.whop.apiKey]]),
       docs: "https://docs.whop.com/developer/api/quickstart",
@@ -115,15 +115,15 @@ export function integrationStatuses(): IntegrationStatus[] {
     {
       key: "whop-webhook",
       label: "Whop — webhooks signés (Standard Webhooks)",
-      stage: "1 · Recrutement",
+      stage: "1 · Clients",
       mode: live.whopWebhook() ? "live" : "mock",
       missing: miss([["WHOP_WEBHOOK_SECRET", config.whop.webhookSecret]]),
       docs: "https://docs.whop.com/developer/guides/webhooks",
     },
     {
       key: "whop-oauth",
-      label: "Whop — connexion des clippers (OAuth)",
-      stage: "1 · Recrutement",
+      label: "Whop — connexion des clients (OAuth)",
+      stage: "1 · Clients",
       mode: live.whopOauth() ? "live" : "mock",
       missing: miss([
         ["WHOP_OAUTH_CLIENT_ID", config.whop.oauth.clientId],
@@ -148,8 +148,8 @@ export function integrationStatuses(): IntegrationStatus[] {
     },
     {
       key: "hooks",
-      label: `Hooks — ${live.hooksLlm() ? "Claude" : "heuristique"}`,
-      stage: "3 · Moments & hooks",
+      label: `Hooks candidats — ${live.hooksLlm() ? "Claude (API)" : "heuristique"}`,
+      stage: "2 · Analyse",
       mode: live.hooksLlm() ? "live" : "mock",
       missing: miss([["ANTHROPIC_API_KEY", config.hooks.anthropicKey]]),
       docs: "https://docs.claude.com/en/api/messages",

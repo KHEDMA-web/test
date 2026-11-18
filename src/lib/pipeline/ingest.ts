@@ -12,16 +12,20 @@ import type { Segment } from "../transcription/types";
 import { probeMedia } from "../render/ffmpeg";
 import { detectMoments, DETECTOR_VERSION } from "./moments";
 import { generateHooks } from "./hooks";
-import type { Rush } from "@prisma/client";
+import type { Rush, RushOrigin } from "@prisma/client";
 
 export type IngestInput = {
   title: string;
   description?: string;
-  campaignId?: string | null;
+  clientId?: string | null;
   uploaderId?: string | null;
   filePath?: string | null;
   sourceUrl?: string | null;
   language?: string | null;
+  origin?: RushOrigin;
+  sourceNote?: string | null;
+  clipsTarget?: number;
+  dueAt?: Date | null;
 };
 
 /** Enregistre le rush et lit ses caractéristiques techniques. */
@@ -33,11 +37,15 @@ export async function ingestRush(input: IngestInput): Promise<Rush> {
     data: {
       title: input.title,
       description: input.description,
-      campaignId: input.campaignId ?? null,
+      clientId: input.clientId ?? null,
       uploaderId: input.uploaderId ?? null,
       filePath: input.filePath ?? null,
       sourceUrl: input.sourceUrl ?? null,
       language: input.language ?? "fr",
+      origin: input.origin ?? "CLIENT_UPLOAD",
+      sourceNote: input.sourceNote ?? null,
+      clipsTarget: input.clipsTarget ?? 3,
+      dueAt: input.dueAt ?? null,
       status: "PROBING",
     },
   });
@@ -145,16 +153,16 @@ export async function detectRushMoments(
 ): Promise<{ moments: number; hooks: number; warnings: string[] }> {
   const rush = await prisma.rush.findUniqueOrThrow({
     where: { id: rushId },
-    include: { campaign: true },
+    include: { client: true },
   });
   const rows = await prisma.transcriptSegment.findMany({ where: { rushId }, orderBy: { idx: "asc" } });
   if (rows.length === 0) throw new Error("Aucun segment transcrit : lancer la transcription d'abord.");
 
   const segments = toSegments(rows);
   const detected = detectMoments(segments, {
-    minSeconds: opts.minSeconds ?? rush.campaign?.minClipSeconds ?? 15,
-    maxSeconds: opts.maxSeconds ?? rush.campaign?.maxClipSeconds ?? 75,
-    limit: opts.limit ?? rush.campaign?.clipsPerRush ?? 8,
+    minSeconds: opts.minSeconds ?? rush.client?.minClipSeconds ?? 15,
+    maxSeconds: opts.maxSeconds ?? rush.client?.maxClipSeconds ?? 75,
+    limit: opts.limit ?? rush.client?.clipsPerRush ?? 8,
   });
 
   // On repart de zéro : la détection est idempotente, mais on conserve les
@@ -185,7 +193,7 @@ export async function detectRushMoments(
     });
 
     const { hooks, provider, warning } = await generateHooks(m, {
-      guidelines: rush.campaign?.hookGuidelines,
+      guidelines: rush.client?.hookGuidelines,
     });
     if (warning && !warnings.includes(warning)) warnings.push(warning);
 

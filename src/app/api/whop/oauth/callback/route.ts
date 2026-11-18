@@ -42,7 +42,7 @@ export async function GET(req: Request) {
     create: {
       email,
       name: profile.name ?? profile.username ?? email.split("@")[0],
-      role: "CLIPPER",
+      role: "CLIENT",
       whopUserId: profile.sub,
       whopUsername: profile.username,
       avatarUrl: profile.picture,
@@ -51,15 +51,19 @@ export async function GET(req: Request) {
   });
 
   const hasAccess = await whop.hasAccess(profile.sub, config.whop.productId).catch(() => false);
+  // Un abonnement valide = un client payant : on le rattache à sa fiche.
+  if (hasAccess) {
+    await prisma.client.updateMany({ where: { whopUserId: profile.sub }, data: { userId: user.id } });
+  }
 
   await logEvent({
     stage: "whop",
     entity: `user:${user.id}`,
-    message: `Connexion Whop de ${user.name}${hasAccess ? " (accès clipper confirmé)" : " (aucun membership valide)"}`,
+    message: `Connexion Whop de ${user.name}${hasAccess ? " (abonnement valide)" : " (aucun abonnement valide)"}`,
   });
 
   jar.delete("whop_oauth_state");
   jar.delete("whop_oauth_verifier");
 
-  return NextResponse.redirect(new URL(hasAccess ? "/studio" : "/recruitment", url.origin));
+  return NextResponse.redirect(new URL(hasAccess ? "/clients" : "/", url.origin));
 }

@@ -2,114 +2,109 @@ import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { PageHeader, Stat, StatusBadge, ScorePill, Meter } from "@/components/ui";
 import { integrationStatuses } from "@/lib/config";
-import { formatCompact, relativeTime, formatDateTime } from "@/lib/utils";
-import { runDemoPipelineAction, processQueueAction } from "@/app/actions";
+import { formatCompact, formatCents, relativeTime } from "@/lib/utils";
+import { demoRushAction, processQueueAction } from "@/app/actions";
 import { SubmitButton } from "@/components/SubmitButton";
 
 export const dynamic = "force-dynamic";
 
 const STAGES = [
-  { n: 1, key: "whop", label: "Recrutement Whop", href: "/recruitment", color: "var(--stage-1)" },
-  { n: 2, key: "rush", label: "Rushes transcrits", href: "/rushes", color: "var(--stage-2)" },
-  { n: 3, key: "moments", label: "Moments & hooks", href: "/rushes", color: "var(--stage-3)" },
-  { n: 4, key: "clips", label: "Clips montés", href: "/studio", color: "var(--stage-4)" },
+  { n: 1, key: "clients", label: "Clients payants (Whop)", href: "/clients", color: "var(--stage-1)" },
+  { n: 2, key: "rushes", label: "Rushes analysés", href: "/rushes", color: "var(--stage-2)" },
+  { n: 3, key: "plans", label: "Montages décidés avec Claude", href: "/montage", color: "var(--stage-3)" },
+  { n: 4, key: "clips", label: "Clips validés", href: "/review", color: "var(--stage-4)" },
   { n: 5, key: "published", label: "Publiés via Metricool", href: "/publishing", color: "var(--stage-5)" },
 ];
 
 export default async function DashboardPage() {
   const [
-    applications,
-    acceptedApps,
-    clippers,
+    clients,
+    activeClients,
     rushes,
     readyRushes,
     moments,
-    hooks,
+    plans,
+    claudePlans,
     clips,
     approvedClips,
+    toReview,
     publications,
     scheduledPubs,
     publishedPubs,
     failedPubs,
     events,
-    topClippers,
     totalViews,
-    pendingReview,
+    topClients,
   ] = await Promise.all([
-    prisma.application.count(),
-    prisma.application.count({ where: { status: "ACCEPTED" } }),
-    prisma.clipperProfile.count({ where: { blocked: false } }),
+    prisma.client.count(),
+    prisma.client.findMany({ where: { status: { in: ["ACTIVE", "TRIAL"] } } }),
     prisma.rush.count(),
     prisma.rush.count({ where: { status: "READY" } }),
     prisma.moment.count(),
-    prisma.hook.count(),
+    prisma.editPlan.count(),
+    prisma.editPlan.count({ where: { source: { in: ["CLAUDE_CHAT", "CLAUDE_CODE"] } } }),
     prisma.clip.count(),
     prisma.clip.count({ where: { status: { in: ["APPROVED", "SCHEDULED", "PUBLISHED"] } } }),
+    prisma.clip.count({ where: { status: "READY" } }),
     prisma.publication.count(),
     prisma.publication.count({ where: { status: "SCHEDULED" } }),
     prisma.publication.count({ where: { status: "PUBLISHED" } }),
     prisma.publication.count({ where: { status: "FAILED" } }),
     prisma.pipelineEvent.findMany({ orderBy: { createdAt: "desc" }, take: 12 }),
-    prisma.clipperProfile.findMany({
-      where: { blocked: false },
-      orderBy: { score: "desc" },
-      take: 4,
-      include: { user: true },
-    }),
     prisma.clip.aggregate({ _sum: { views: true } }),
-    prisma.clip.count({ where: { status: "SUBMITTED" } }),
+    prisma.client.findMany({
+      where: { status: { in: ["ACTIVE", "TRIAL"] } },
+      orderBy: { mrrCents: "desc" },
+      take: 4,
+    }),
   ]);
 
   const counts: Record<string, number> = {
-    whop: acceptedApps,
-    rush: readyRushes,
-    moments,
-    clips,
+    clients: activeClients.length,
+    rushes: readyRushes,
+    plans,
+    clips: approvedClips,
     published: publishedPubs + scheduledPubs,
   };
   const maxCount = Math.max(...Object.values(counts), 1);
   const integrations = integrationStatuses();
   const mockCount = integrations.filter((i) => i.mode === "mock").length;
 
-  const campaign = await prisma.campaign.findFirst({ where: { status: "ACTIVE" } });
+  const mrr = activeClients.reduce((s, c) => s + c.mrrCents, 0);
+  const committed = activeClients.reduce((s, c) => s + c.clipsPerMonth, 0);
+  const delivered = activeClients.reduce((s, c) => s + c.clipsDelivered, 0);
 
   return (
     <>
       <PageHeader
-        title="Pipeline de clipping"
-        description="Le flux complet, de la candidature d'un clipper sur Whop jusqu'à la publication programmée. Chaque étage est autonome : on peut reprendre une étape sans refaire les précédentes."
+        title="Mon atelier de clipping"
+        description="Whop m'amène des clients qui paient pour du clipping. Je récupère ou je vais chercher leur matière, je la fais analyser, je monte avec Claude, et Metricool publie. Chaque étage est repris indépendamment."
         actions={
           <>
             <form action={processQueueAction}>
               <SubmitButton pendingLabel="Traitement…">Traiter la file Metricool</SubmitButton>
             </form>
-            <form action={runDemoPipelineAction}>
-              <input type="hidden" name="campaignId" value={campaign?.id ?? ""} />
-              <SubmitButton className="btn-primary" pendingLabel="Pipeline en cours…">
-                Lancer un rush de test
-              </SubmitButton>
+            <form action={demoRushAction}>
+              <input type="hidden" name="clientId" value={activeClients[0]?.id ?? ""} />
+              <SubmitButton className="btn-primary" pendingLabel="Analyse en cours…">Rush de test</SubmitButton>
             </form>
           </>
         }
       />
 
       {mockCount > 0 ? (
-        <div
-          className="card"
-          style={{ padding: "0.7rem 1rem", marginBottom: "1.4rem", borderColor: "#f59e0b44", background: "#f59e0b0d", fontSize: "0.84rem" }}
-        >
+        <div className="card" style={{ padding: "0.7rem 1rem", marginBottom: "1.4rem", borderColor: "#f59e0b44", background: "#f59e0b0d", fontSize: "0.84rem" }}>
           <strong style={{ color: "#fbbf24" }}>{mockCount} intégration(s) en mode mock.</strong>{" "}
           <span style={{ color: "var(--text-muted)" }}>
-            Le flux tourne de bout en bout sans appel réseau. Renseignez les clés dans{" "}
-            <Link href="/settings" style={{ color: "var(--accent)" }}>Réglages</Link> pour basculer en réel.
+            Tout tourne sans appel réseau. Les clés se renseignent dans{" "}
+            <Link href="/settings" style={{ color: "var(--accent)" }}>Réglages</Link>.
           </span>
         </div>
       ) : null}
 
-      {/* ── Entonnoir ─────────────────────────────────────── */}
       <section className="card" style={{ padding: "1.3rem 1.4rem", marginBottom: "1.4rem" }}>
         <h2 style={{ margin: "0 0 1.1rem", fontSize: "0.78rem", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--text-faint)" }}>
-          Entonnoir du flux
+          Le flux
         </h2>
         <div style={{ display: "grid", gap: "0.9rem" }}>
           {STAGES.map((s) => {
@@ -148,27 +143,27 @@ export default async function DashboardPage() {
       </section>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: "0.9rem", marginBottom: "1.4rem" }}>
-        <Stat label="Candidatures" value={applications} sub={`${acceptedApps} acceptées · ${clippers} clippers actifs`} />
-        <Stat label="Rushes" value={rushes} sub={`${readyRushes} prêts à monter`} />
-        <Stat label="Moments / hooks" value={`${moments} / ${hooks}`} sub="détectés et scorés" />
-        <Stat label="Clips" value={clips} sub={`${approvedClips} validés · ${pendingReview} à valider`} accent={pendingReview > 0 ? "#fbbf24" : undefined} />
+        <Stat label="Revenu mensuel" value={formatCents(mrr)} sub={`${activeClients.length} client(s) actifs sur ${clients}`} accent="#4ade80" />
+        <Stat label="Clips du mois" value={`${delivered} / ${committed}`} sub="livrés sur engagés" accent={delivered < committed ? "#fbbf24" : "#4ade80"} />
+        <Stat label="Rushes" value={rushes} sub={`${readyRushes} analysés · ${moments} moments`} />
+        <Stat label="Montages" value={plans} sub={`${claudePlans} décidés avec Claude`} accent="#c084fc" />
+        <Stat label="Clips" value={clips} sub={`${approvedClips} validés · ${toReview} à relire`} accent={toReview > 0 ? "#fbbf24" : undefined} />
         <Stat
           label="Publications"
           value={publications}
           sub={`${scheduledPubs} planifiées · ${publishedPubs} publiées${failedPubs ? ` · ${failedPubs} en échec` : ""}`}
           accent={failedPubs > 0 ? "#f87171" : undefined}
         />
-        <Stat label="Vues cumulées" value={formatCompact(totalViews._sum.views ?? 0)} sub="sur les clips publiés" accent="#4ade80" />
+        <Stat label="Vues cumulées" value={formatCompact(totalViews._sum.views ?? 0)} sub="sur les clips livrés" />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.4fr) minmax(0, 1fr)", gap: "1rem", alignItems: "start" }}>
-        {/* ── Journal ──────────────────────────────────────── */}
         <section className="card" style={{ padding: "1.1rem 1.2rem" }}>
           <h2 style={{ margin: "0 0 0.9rem", fontSize: "0.78rem", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--text-faint)" }}>
-            Journal du pipeline
+            Journal
           </h2>
           {events.length === 0 ? (
-            <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>Rien pour l'instant. Lancez un rush de test.</p>
+            <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>Rien pour l'instant.</p>
           ) : (
             <div style={{ display: "grid", gap: "0.1rem" }}>
               {events.map((e) => (
@@ -187,27 +182,26 @@ export default async function DashboardPage() {
         </section>
 
         <div style={{ display: "grid", gap: "1rem" }}>
-          {/* ── Meilleurs clippers ─────────────────────────── */}
           <section className="card" style={{ padding: "1.1rem 1.2rem" }}>
             <h2 style={{ margin: "0 0 0.9rem", fontSize: "0.78rem", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--text-faint)" }}>
-              Meilleurs clippers
+              Mes plus gros clients
             </h2>
-            {topClippers.length === 0 ? (
-              <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>Aucun clipper recruté.</p>
+            {topClients.length === 0 ? (
+              <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>Aucun client actif.</p>
             ) : (
               <div style={{ display: "grid", gap: "0.8rem" }}>
-                {topClippers.map((c) => (
+                {topClients.map((c) => (
                   <div key={c.id}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem", marginBottom: "0.3rem" }}>
-                      <span style={{ fontSize: "0.85rem", fontWeight: 500 }}>{c.user.name}</span>
+                      <span style={{ fontSize: "0.85rem", fontWeight: 500 }}>{c.name}</span>
                       <span style={{ display: "flex", gap: "0.35rem" }}>
-                        <StatusBadge status={c.tier} />
+                        <StatusBadge status={c.status} />
                         <ScorePill score={c.score} />
                       </span>
                     </div>
-                    <Meter value={c.score} />
+                    <Meter value={c.clipsDelivered} max={Math.max(1, c.clipsPerMonth)} />
                     <div style={{ fontSize: "0.72rem", color: "var(--text-faint)", marginTop: "0.25rem" }}>
-                      {c.clipsPublished} clips · {formatCompact(c.avgViews)} vues/clip · {Math.round(c.approvalRate)} % validés
+                      {formatCents(c.mrrCents)}/mois · {c.clipsDelivered}/{c.clipsPerMonth} clips livrés
                     </div>
                   </div>
                 ))}
@@ -215,7 +209,6 @@ export default async function DashboardPage() {
             )}
           </section>
 
-          {/* ── État des intégrations ──────────────────────── */}
           <section className="card" style={{ padding: "1.1rem 1.2rem" }}>
             <h2 style={{ margin: "0 0 0.9rem", fontSize: "0.78rem", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--text-faint)" }}>
               Intégrations
@@ -240,12 +233,6 @@ export default async function DashboardPage() {
           </section>
         </div>
       </div>
-
-      {events[0] ? (
-        <p style={{ marginTop: "1.2rem", fontSize: "0.74rem", color: "var(--text-faint)" }}>
-          Dernière activité : {formatDateTime(events[0].createdAt)}
-        </p>
-      ) : null}
     </>
   );
 }

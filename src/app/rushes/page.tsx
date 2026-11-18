@@ -2,115 +2,137 @@ import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { PageHeader, StatusBadge, Empty, Stat } from "@/components/ui";
 import { SubmitButton } from "@/components/SubmitButton";
-import { runDemoPipelineAction, ingestUrlAction } from "@/app/actions";
+import { demoRushAction, ingestUrlAction, uploadRushAction } from "@/app/actions";
 import { formatDuration, relativeTime } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
-export default async function RushesPage() {
-  const [rushes, campaigns, totalMoments] = await Promise.all([
+export default async function RushesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ client?: string }>;
+}) {
+  const { client: clientFilter } = await searchParams;
+
+  const [rushes, clients] = await Promise.all([
     prisma.rush.findMany({
+      where: clientFilter ? { clientId: clientFilter } : undefined,
       orderBy: { createdAt: "desc" },
       include: {
-        campaign: true,
-        _count: { select: { moments: true, clips: true, segments: true } },
+        client: true,
+        _count: { select: { moments: true, clips: true, segments: true, editPlans: true } },
       },
     }),
-    prisma.campaign.findMany({ where: { status: "ACTIVE" } }),
-    prisma.moment.count(),
+    prisma.client.findMany({
+      where: { status: { in: ["ACTIVE", "TRIAL"] } },
+      orderBy: { name: "asc" },
+    }),
   ]);
 
   const ready = rushes.filter((r) => r.status === "READY").length;
+  const filtered = clients.find((c) => c.id === clientFilter);
 
   return (
     <>
       <PageHeader
         stage="Étage 2 · Rush"
-        title="Rushes"
-        description="Le rush brut entre ici. Il est sondé (durée, format, piste audio), transcrit avec des horodatages au mot, puis découpé en moments candidats. La transcription et la détection sont relançables indépendamment."
+        title={filtered ? `Rushes — ${filtered.name}` : "Rushes"}
+        description="La matière première : ce que le client dépose, ou ce que je vais chercher chez lui. Chaque rush est sondé, transcrit au mot, puis découpé en moments candidats qui alimenteront le brief de montage."
         actions={
-          <form action={runDemoPipelineAction}>
-            <input type="hidden" name="campaignId" value={campaigns[0]?.id ?? ""} />
-            <SubmitButton className="btn-primary" pendingLabel="Génération + pipeline…">
-              Rush de test
-            </SubmitButton>
-          </form>
+          <>
+            {filtered ? <Link href="/rushes" className="btn">Tous les clients</Link> : null}
+            <form action={demoRushAction}>
+              <input type="hidden" name="clientId" value={clientFilter ?? clients[0]?.id ?? ""} />
+              <SubmitButton pendingLabel="Génération + analyse…">Rush de test</SubmitButton>
+            </form>
+          </>
         }
       />
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "0.9rem", marginBottom: "1.4rem" }}>
-        <Stat label="Rushes" value={rushes.length} sub={`${ready} prêts à monter`} />
-        <Stat label="Moments détectés" value={totalMoments} sub="toutes sources confondues" />
-        <Stat
-          label="Durée ingérée"
-          value={formatDuration(rushes.reduce((s, r) => s + (r.durationSec ?? 0), 0))}
-          sub="de rush analysé"
-        />
+        <Stat label="Rushes" value={rushes.length} sub={`${ready} analysés`} />
+        <Stat label="Durée ingérée" value={formatDuration(rushes.reduce((s, r) => s + (r.durationSec ?? 0), 0))} />
+        <Stat label="Montages" value={rushes.reduce((s, r) => s + r._count.editPlans, 0)} sub="plans enregistrés" />
+        <Stat label="Clips" value={rushes.reduce((s, r) => s + r._count.clips, 0)} />
       </div>
 
       <section className="card" style={{ padding: "1.1rem 1.2rem", marginBottom: "1.4rem" }}>
-        <h2 style={{ margin: "0 0 0.8rem", fontSize: "0.88rem", fontWeight: 600 }}>Importer depuis une URL</h2>
-        <form action={ingestUrlAction} style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1.6fr) 12rem auto", gap: "0.6rem", alignItems: "end" }}>
-          <label style={{ display: "grid", gap: "0.3rem", fontSize: "0.75rem", color: "var(--text-muted)" }}>
-            Titre
-            <input className="input" name="title" placeholder="Épisode 13" required />
-          </label>
-          <label style={{ display: "grid", gap: "0.3rem", fontSize: "0.75rem", color: "var(--text-muted)" }}>
-            URL du fichier (accessible publiquement)
-            <input className="input" name="sourceUrl" type="url" placeholder="https://cdn.exemple.com/episode-13.mp4" required />
-          </label>
-          <label style={{ display: "grid", gap: "0.3rem", fontSize: "0.75rem", color: "var(--text-muted)" }}>
-            Campagne
-            <select className="select" name="campaignId" defaultValue={campaigns[0]?.id ?? ""}>
-              <option value="">Aucune</option>
-              {campaigns.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
+        <h2 style={{ margin: "0 0 0.9rem", fontSize: "0.9rem", fontWeight: 600 }}>Ajouter de la matière</h2>
+
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: "1.4rem" }}>
+          <form action={uploadRushAction} style={{ display: "grid", gap: "0.55rem" }}>
+            <div style={{ fontSize: "0.76rem", color: "var(--text-muted)", fontWeight: 600 }}>Déposer un fichier</div>
+            <input className="input" type="file" name="file" accept="video/*,audio/*" required />
+            <input className="input" name="title" placeholder="Titre du rush" />
+            <select className="select" name="clientId" defaultValue={clientFilter ?? clients[0]?.id ?? ""}>
+              <option value="">Aucun client</option>
+              {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
-          </label>
-          <SubmitButton pendingLabel="Analyse…">Importer</SubmitButton>
-        </form>
+            <div><SubmitButton pendingLabel="Analyse…">Importer le fichier</SubmitButton></div>
+          </form>
+
+          <form action={ingestUrlAction} style={{ display: "grid", gap: "0.55rem" }}>
+            <div style={{ fontSize: "0.76rem", color: "var(--text-muted)", fontWeight: 600 }}>Depuis une URL</div>
+            <input className="input" name="sourceUrl" type="url" placeholder="https://cdn.exemple.com/episode.mp4" required />
+            <input className="input" name="title" placeholder="Titre du rush" required />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+              <select className="select" name="clientId" defaultValue={clientFilter ?? clients[0]?.id ?? ""}>
+                <option value="">Aucun client</option>
+                {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              <select className="select" name="origin" defaultValue="CLIENT_UPLOAD">
+                <option value="CLIENT_UPLOAD">Fourni par le client</option>
+                <option value="SOURCED">Trouvé par moi</option>
+              </select>
+            </div>
+            <div><SubmitButton pendingLabel="Analyse…">Importer l'URL</SubmitButton></div>
+          </form>
+        </div>
       </section>
 
       {rushes.length === 0 ? (
-        <Empty title="Aucun rush" hint="Importez une URL ou générez un rush de test." />
+        <Empty title="Aucun rush" hint="Déposez un fichier, importez une URL, ou générez un rush de test." />
       ) : (
         <section className="card" style={{ overflow: "hidden" }}>
           <table className="data">
             <thead>
               <tr>
                 <th>Rush</th>
-                <th>Campagne</th>
+                <th>Client</th>
+                <th>Provenance</th>
                 <th>Durée</th>
-                <th>Format</th>
                 <th>Segments</th>
                 <th>Moments</th>
-                <th>Clips</th>
+                <th>Montages</th>
                 <th>État</th>
                 <th>Reçu</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
               {rushes.map((r) => (
                 <tr key={r.id}>
                   <td>
-                    <Link href={`/rushes/${r.id}`} style={{ fontWeight: 550, color: "var(--text)" }}>
-                      {r.title}
-                    </Link>
-                    <div style={{ fontSize: "0.72rem", color: "var(--text-faint)" }}>
+                    <Link href={`/rushes/${r.id}`} style={{ fontWeight: 550 }}>{r.title}</Link>
+                    <div style={{ fontSize: "0.71rem", color: "var(--text-faint)" }}>
                       {r.transcriptProvider ? `transcrit via ${r.transcriptProvider}` : "non transcrit"}
                     </div>
                   </td>
-                  <td style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>{r.campaign?.name ?? "—"}</td>
-                  <td className="mono">{formatDuration(r.durationSec)}</td>
-                  <td className="mono" style={{ fontSize: "0.76rem" }}>
-                    {r.width && r.height ? `${r.width}×${r.height}` : "—"}
+                  <td style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>{r.client?.name ?? "—"}</td>
+                  <td style={{ fontSize: "0.75rem", color: "var(--text-faint)" }}>
+                    {r.origin === "CLIENT_UPLOAD" ? "client" : "sourcé"}
                   </td>
+                  <td className="mono">{formatDuration(r.durationSec)}</td>
                   <td className="mono">{r._count.segments}</td>
                   <td className="mono">{r._count.moments}</td>
-                  <td className="mono">{r._count.clips}</td>
+                  <td className="mono">{r._count.editPlans}</td>
                   <td><StatusBadge status={r.status} /></td>
-                  <td style={{ fontSize: "0.74rem", color: "var(--text-faint)" }}>{relativeTime(r.createdAt)}</td>
+                  <td style={{ fontSize: "0.73rem", color: "var(--text-faint)" }}>{relativeTime(r.createdAt)}</td>
+                  <td>
+                    {r.transcriptStatus === "DONE" ? (
+                      <Link href={`/rushes/${r.id}/montage`} className="btn btn-primary">Monter</Link>
+                    ) : null}
+                  </td>
                 </tr>
               ))}
             </tbody>
