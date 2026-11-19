@@ -5,6 +5,7 @@
  *   npm test
  */
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { qualifyClient, productionPriority, MIN_VIABLE_PRICE_PER_CLIP_CENTS } from "../src/lib/whop/qualify";
 import { extractJsonBlock, parsePlanInput, validateClip } from "../src/lib/pipeline/editPlan";
 import { remapSegmentsForCuts } from "../src/lib/render/ass";
@@ -605,6 +606,28 @@ async function main() {
   check("une seule position produit quand même un intervalle valide", () => {
     const cmd = buildSendcmd("crop@fc1", [{ t: 0, x: 42 }], 3).trim();
     assert(/^0\.000-3\.000 \[enter\] crop@fc1 x 42;$/.test(cmd), cmd);
+  });
+
+
+  console.log("\n── Scripts Python ──");
+
+  check("aucun nom utilisé sans être défini", () => {
+    // Python ne signale un nom manquant qu'en exécutant la ligne fautive.
+    // Dans une branche rare — un repli réseau — il dort jusqu'au jour où il
+    // saute, et un `except` large le déguise en erreur ordinaire. C'est
+    // arrivé : la cascade de replis du téléchargement appelait trois noms
+    // inexistants, et le téléchargement par lien n'a jamais fonctionné.
+    const python = process.env.CLIPFLOW_PYTHON ?? "python3";
+    const r = spawnSync(
+      python,
+      ["-I", "scripts/verifier_python.py", "scripts/resolve_source.py", "scripts/transcribe_local.py", "scripts/face_track.py"],
+      { encoding: "utf8" },
+    );
+    if (r.error) {
+      console.log(`    (ignoré : ${python} introuvable)`);
+      return;
+    }
+    assert(r.status === 0, (r.stdout || "") + (r.stderr || ""));
   });
 
   console.log("\n── Étage 5 · Metricool ──");
