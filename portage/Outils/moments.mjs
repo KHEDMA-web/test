@@ -17,7 +17,7 @@
  * détail, le monteur peut contester le score.
  */
 import { clamp } from "./commun.mjs";
-import { countMatches, dominantEmotion, extractFigures, extractKeywords, FILLERS, HOUSEKEEPING, normalize, STRONG_OPENERS, TURN_MARKERS, WEAK_OPENERS, } from "./lexique.mjs";
+import { countMatches, dominantEmotion, extractFigures, extractKeywords, lexiconFor, normalize, toLang, } from "./lexique.mjs";
 export const DETECTOR_VERSION = "heuristic-v1";
 /** Pondération des critères, documentée pour pouvoir être ajustée sans fouiller le code. */
 export const WEIGHTS = {
@@ -36,14 +36,23 @@ function textOf(segments) {
 function wordCount(text) {
     return text.split(/\s+/).filter(Boolean).length;
 }
-function scoreOpener(first) {
+const PRONOUN_OPEN = {
+    fr: /^(il|elle|ils|elles|ça|c'|lui|leur|ce truc|ce point)\b/,
+    en: /^(he|she|it|they|them|that|this|those|these)\b/,
+};
+const IMPERATIVE = {
+    fr: /^(arrête|oublie|imagine|regarde|écoute|prends|arrêtez|pense)/,
+    en: /^(stop|forget|imagine|look|listen|take|think|picture)\b/,
+};
+function scoreOpener(first, lang) {
+    const lex = lexiconFor(lang);
     const norm = normalize(first);
-    const strong = countMatches(norm, STRONG_OPENERS);
+    const strong = countMatches(norm, lex.strongOpeners);
     const firstWord = norm.split(/[\s,]/)[0] ?? "";
-    const weakStart = WEAK_OPENERS.some((w) => norm.startsWith(normalize(w) + " ") || firstWord === normalize(w));
+    const weakStart = lex.weakOpeners.some((w) => norm.startsWith(normalize(w) + " ") || firstWord === normalize(w));
     const isQuestion = /\?/.test(first);
-    const hasFigure = extractFigures(first).length > 0;
-    const isImperative = /^(arrête|oublie|imagine|regarde|écoute|prends|arrêtez|pense)/.test(norm);
+    const hasFigure = extractFigures(first, lang).length > 0;
+    const isImperative = IMPERATIVE[lang].test(norm);
     let pts = 4; // socle : une phrase existe
     if (strong > 0)
         pts += 7;
@@ -70,6 +79,7 @@ export function detectMoments(segments, opts = {}) {
     const limit = opts.limit ?? 8;
     const overlapThreshold = opts.overlapThreshold ?? 0.35;
     const minScore = opts.minScore ?? 30;
+    const lang = toLang(opts.language);
     if (segments.length === 0)
         return [];
     const sorted = [...segments].sort((a, b) => a.startSec - b.startSec);
@@ -84,7 +94,7 @@ export function detectMoments(segments, opts = {}) {
                 continue;
             if (duration > maxSeconds)
                 break; // fenêtres suivantes encore plus longues
-            candidates.push(scoreWindow(window, start, end, duration));
+            candidates.push(scoreWindow(window, start, end, duration, lang));
         }
     }
     // Déduplication : on garde les meilleurs, on écarte ce qui se recouvre trop.
@@ -106,25 +116,25 @@ function overlapRatio(a, b) {
     const shortest = Math.min(a.durationSec, b.durationSec);
     return shortest <= 0 ? 0 : inter / shortest;
 }
-function scoreWindow(window, start, end, duration) {
+function scoreWindow(window, start, end, duration, lang) {
     const transcript = textOf(window);
     const norm = normalize(transcript);
     const words = wordCount(transcript);
     const wps = words / Math.max(1, duration);
     // ── Critère 1 : ouverture ───────────────────────────────────
-    const opener = scoreOpener(window[0].text.trim());
+    const opener = scoreOpener(window[0].text.trim(), lang);
     // ── Critère 2 : charge émotionnelle ─────────────────────────
-    const emo = dominantEmotion(transcript);
+    const emo = dominantEmotion(transcript, lang);
     const emotionPts = clamp(Math.round(emo.hits * 4.5), 0, WEIGHTS.emotion);
     // ── Critère 3 : spécificité ─────────────────────────────────
-    const figures = extractFigures(transcript);
+    const figures = extractFigures(transcript, lang);
     const specificityPts = clamp(figures.length * 4, 0, WEIGHTS.specificity);
     // ── Critère 4 : arc narratif ────────────────────────────────
-    const turns = countMatches(norm, TURN_MARKERS);
+    const turns = countMatches(norm, lexiconFor(lang).turnMarkers);
     const narrativePts = clamp(turns * 6, 0, WEIGHTS.narrative);
     // ── Critère 5 : autonomie hors contexte ─────────────────────
     const endsClean = /[.!?]$/.test(transcript);
-    const pronounOpen = /^(il|elle|ils|elles|ça|c'|lui|leur|ce truc|ce point)\b/.test(norm);
+    const pronounOpen = PRONOUN_OPEN[lang].test(norm);
     let standalonePts = WEIGHTS.standalone;
     if (!endsClean)
         standalonePts -= 5;
@@ -133,7 +143,7 @@ function scoreWindow(window, start, end, duration) {
     if (window.length === 1 && words < 18)
         standalonePts -= 3;
     // ── Critère 6 : densité utile (débit moins le remplissage) ──
-    const fillerHits = countMatches(norm, FILLERS);
+    const fillerHits = countMatches(norm, lexiconFor(lang).fillers);
     const fillerRatio = fillerHits / Math.max(1, words / 10); // pour 10 mots
     const idealWps = 2.8;
     const densityPts = clamp(Math.round((1 - Math.min(1, Math.abs(wps - idealWps) / idealWps)) * WEIGHTS.density), 0, WEIGHTS.density);
@@ -159,7 +169,7 @@ function scoreWindow(window, start, end, duration) {
         { key: "rhythm", label: "Rythme", raw: `blanc max ${longestGap.toFixed(2)} s`, points: rhythmPts, max: WEIGHTS.rhythm },
     ];
     // ── Pénalités ───────────────────────────────────────────────
-    const houseHits = countMatches(norm, HOUSEKEEPING);
+    const houseHits = countMatches(norm, lexiconFor(lang).housekeeping);
     const penalties = [
         {
             key: "housekeeping",
@@ -193,11 +203,12 @@ function scoreWindow(window, start, end, duration) {
         criteria,
         penalties,
         transcript,
-        keywords: extractKeywords(transcript),
+        keywords: extractKeywords(transcript, 6, lang),
         figures,
         emotion: emo.emotion,
         rationale,
         segmentIdx: window.map((s) => s.idx),
         detector: DETECTOR_VERSION,
+        language: lang,
     };
 }

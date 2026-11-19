@@ -6,8 +6,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "→ Préparation des sources"
-rm -rf portage/_source portage/Outils
+# On n'efface que ce que ce script produit. Un « rm -rf portage/Outils » a
+# déjà emporté un module écrit à la main avant qu'il soit commité : tout ce
+# qui n'est pas dans cette liste est à quelqu'un d'autre, on n'y touche pas.
+ENGENDRES=(commun lexique moments sous-titres suivi-visage clip-rendre accroches)
+rm -rf portage/_source
 mkdir -p portage/_source portage/Outils
+for nom in "${ENGENDRES[@]}"; do rm -f "portage/Outils/$nom.mjs" "portage/Outils/$nom.js"; done
+rm -f portage/Outils/suivi_visage.py portage/Outils/source.py portage/Outils/transcrire_local.py
 
 cat > portage/_source/commun.ts <<'TS'
 /**
@@ -87,6 +93,7 @@ npx tsc -p portage/_source/tsconfig.json
 echo "→ Extensions et spécificateurs"
 cd portage/Outils
 for f in *.js; do
+  [ -e "$f" ] || continue
   sed -e 's|\(from "\./[a-z-]*\)\.js"|\1.mjs"|g' "$f" > "${f%.js}.mjs"
   rm "$f"
 done
@@ -100,4 +107,4 @@ cp scripts/transcribe_local.py portage/Outils/transcrire_local.py
 echo "→ Vérification"
 for f in portage/Outils/*.mjs; do node --check "$f"; done
 rm -rf portage/_source
-echo "Portage reconstruit : $(ls portage/Outils | wc -l) fichiers"
+echo "Portage reconstruit : ${#ENGENDRES[@]} modules engendrés, $(ls portage/Outils | wc -l) fichiers au total"

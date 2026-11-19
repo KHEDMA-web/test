@@ -12,6 +12,7 @@ import { buildSendcmd } from "../src/lib/render/faceTrack";
 import { BRIEF_CHAR_BUDGET } from "../src/lib/pipeline/brief";
 import { verifyWhopWebhook, signPayload, WebhookVerificationError } from "../src/lib/whop/webhook";
 import { detectMoments } from "../src/lib/pipeline/moments";
+import { extractKeywords, dominantEmotion, extractFigures } from "../src/lib/pipeline/lexicon";
 import { generateHeuristicHooks, scoreHook } from "../src/lib/pipeline/hooks";
 import { buildSchedulePayload } from "../src/lib/metricool/client";
 import { networkDataFor } from "../src/lib/metricool/publish";
@@ -338,6 +339,69 @@ async function main() {
     // une part sérieuse d'un quota d'abonnement à chaque montage.
     assert(BRIEF_CHAR_BUDGET >= 10_000, "budget trop bas pour être utile");
     assert(BRIEF_CHAR_BUDGET <= 120_000, "budget trop haut : le rush long passerait entier");
+  });
+
+
+  console.log("\n── Étage 3bis · lexiques bilingues ──");
+
+  const enSeg = (idx: number, startSec: number, endSec: number, text: string) => ({ idx, startSec, endSec, text });
+  const enRiche = [
+    enSeg(0, 0, 9, "What nobody tells you about burnout is that it costs you 40 hours a week."),
+    enSeg(1, 9, 19, "I was terrified, exhausted, completely broken, and I lost $12000 in three months."),
+    enSeg(2, 19, 30, "But actually, turns out the problem is not the work. It is the shame you carry."),
+    enSeg(3, 30, 41, "And then I made one change and doubled my revenue. That is the truth nobody says."),
+  ];
+
+  check("un rush anglais active bien les critères discriminants", () => {
+    // Sans lexique anglais, émotion, chiffres et retournement tombaient tous
+    // à zéro et tous les candidats sortaient au même score.
+    const m = detectMoments(enRiche, { language: "en", minSeconds: 15, maxSeconds: 60, minScore: 0, limit: 1 })[0];
+    const pts = (key: string) => m.criteria.find((c) => c.key === key)?.points ?? 0;
+    assert(pts("emotion") > 0, "charge émotionnelle muette en anglais");
+    assert(pts("specificity") > 0, "chiffres non repérés en anglais");
+    assert(pts("narrative") > 0, "retournement non repéré en anglais");
+    assert(m.score >= 70, `score trop bas pour un passage dense : ${m.score}`);
+  });
+
+  check("l'intro logistique anglaise est pénalisée", () => {
+    const house = [
+      enSeg(0, 0, 10, "Welcome to the channel, don't forget to subscribe and hit the like button."),
+      enSeg(1, 10, 21, "Thanks to everyone supporting us. Link in the description, sponsored by our partner."),
+      enSeg(2, 21, 32, "Before we start, smash that notification bell so you see the next episode."),
+    ];
+    const m = detectMoments(house, { language: "en", minSeconds: 15, maxSeconds: 60, minScore: 0, limit: 1 })[0];
+    assert((m.penalties.find((c) => c.key === "housekeeping")?.points ?? 0) < 0, "intro anglaise non pénalisée");
+  });
+
+  check("un moment anglais produit des hooks anglais", () => {
+    const m = detectMoments(enRiche, { language: "en", minSeconds: 15, maxSeconds: 60, minScore: 0, limit: 1 })[0];
+    const hooks = generateHeuristicHooks(m);
+    assert(hooks.length > 0, "aucun hook");
+    const francais = hooks.filter((h) => /\b(?:Ce que|Pourquoi|Arrête|personne ne te dit|la méthode)\b/.test(h.text));
+    assert(francais.length === 0, `hooks français sur un rush anglais : ${francais.map((h) => h.text).join(" | ")}`);
+  });
+
+  check("les mots vides anglais ne remontent pas en mots-clés", () => {
+    const kw = extractKeywords("What your country can do for you, what you can do for your country", 6, "en");
+    for (const vide of ["what", "your", "country can"]) {
+      assert(!kw.includes(vide.split(" ")[0]) || vide === "country can", `mot vide anglais retenu : ${vide}`);
+    }
+    assert(kw.includes("country"), "le mot plein n'est pas retenu");
+  });
+
+  check("un déterminant collé n'est pas avalé dans le mot suivant", () => {
+    // « Latitude » donnait le sujet « titude », « actually » donnait « ctually ».
+    assert(!extractTopics("Latitude compte. Désormais lensemble bouge.").some((t) => /^titude|^nsemble/.test(t)),
+      "déterminant français avalé");
+    assert(!extractTopics("But actually the approach", 5, "en").some((t) => t === "ctually"),
+      "déterminant anglais avalé");
+    // L'élision française doit continuer de marcher.
+    assert(extractTopics("l'émotion de cette méthode").includes("émotion"), "élision cassée");
+  });
+
+  check("les tables françaises restent inchangées par défaut", () => {
+    assert(dominantEmotion("j'étais terrifié, un échec total").emotion === "peur", "émotion française perdue");
+    assert(extractFigures("il m'a fallu 3 ans et 40 %").length >= 2, "chiffres français perdus");
   });
 
   console.log("\n── Étage 4 · lecture du plan de Claude ──");

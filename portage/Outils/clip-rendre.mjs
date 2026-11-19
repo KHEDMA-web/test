@@ -130,7 +130,10 @@ export async function renderMultiCut(args) {
                     // Suivi indisponible : on retombe sur le recadrage centré plutôt
                     // que de faire échouer le rendu.
                     tracking.push(`coupe ${i + 1} : repli sur le recadrage centré`);
-                    const fallback = framingChain("cover", i, w, h, cut.zoom);
+                    // Sans le zoom : le bloc commun plus bas s'en charge pour le
+                    // cadrage « face ». Le passer ici l'appliquerait deux fois et
+                    // réécrirait la même étiquette, ce que ffmpeg refuse.
+                    const fallback = framingChain("cover", i, w, h);
                     graph.push(...fallback.graph);
                     label = fallback.label;
                 }

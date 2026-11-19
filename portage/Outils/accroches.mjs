@@ -11,32 +11,41 @@
  * par LLM n'est pas retenu d'office, il doit battre les autres.
  */
 import { clamp } from "./commun.mjs";
-import { extractFigures, extractNumericFigures, extractTopics, normalize } from "./lexique.mjs";
+import { extractFigures, extractNumericFigures, extractTopics, normalize, toLang } from "./lexique.mjs";
 /** Longueur cible d'un hook à l'écran : lisible en une seconde. */
 const IDEAL_MAX_CHARS = 58;
-const POWER_OPENERS = [
-    "personne", "arrête", "oublie", "voici", "si tu", "pourquoi", "comment",
-    "ce que", "la vérité", "le secret", "j'ai", "tu crois", "imagine", "90 %",
-];
+const POWER_OPENERS = {
+    fr: [
+        "personne", "arrête", "oublie", "voici", "si tu", "pourquoi", "comment",
+        "ce que", "la vérité", "le secret", "j'ai", "tu crois", "imagine", "90 %",
+    ],
+    en: [
+        "nobody", "no one", "stop", "forget", "here's", "if you", "why", "how",
+        "what", "the truth", "the secret", "i ", "you think", "imagine", "90%",
+    ],
+};
+const TENSION_MARKERS = {
+    fr: ["personne", "ce que", "pourquoi", "jamais", "vraiment", "erreur", "sauf", "avant de", "au lieu de", "la seule"],
+    en: ["nobody", "no one", "what", "why", "never", "really", "mistake", "except", "before you", "instead of", "the only"],
+};
 /**
  * Score d'un hook sur 100.
  * Barème : brièveté 20 · spécificité 20 · tension/curiosité 20 ·
  * force d'ouverture 15 · lisibilité 15 · fidélité au contenu 10.
  */
-export function scoreHook(text, momentTranscript) {
+export function scoreHook(text, momentTranscript, lang = "fr") {
     const chars = text.length;
     const norm = normalize(text);
     const words = text.split(/\s+/).filter(Boolean);
-    const figures = extractFigures(text);
+    const figures = extractFigures(text, lang);
     // Brièveté : plein pot jusqu'à 58 caractères, décroissance ensuite.
     const brevity = chars <= IDEAL_MAX_CHARS
         ? 20
         : clamp(Math.round(20 * (1 - (chars - IDEAL_MAX_CHARS) / 60)), 0, 20);
     const specificity = clamp(figures.length * 10 + (/[A-ZÉÈ][a-zéèê]+/.test(text) ? 4 : 0), 0, 20);
     // Tension : promesse d'information retenue, opposition, enjeu.
-    const tensionMarkers = ["personne", "ce que", "pourquoi", "jamais", "vraiment", "erreur", "sauf", "avant de", "au lieu de", "la seule"];
-    const tension = clamp(tensionMarkers.filter((m) => norm.includes(normalize(m))).length * 7, 0, 20);
-    const opener = POWER_OPENERS.some((p) => norm.startsWith(normalize(p))) ? 15 : /\?$/.test(text) ? 10 : 5;
+    const tension = clamp(TENSION_MARKERS[lang].filter((m) => norm.includes(normalize(m))).length * 7, 0, 20);
+    const opener = POWER_OPENERS[lang].some((p) => norm.startsWith(normalize(p))) ? 15 : /\?$/.test(text) ? 10 : 5;
     // Lisibilité : mots courts, peu de ponctuation, pas de majuscules criées.
     const avgWordLen = words.reduce((s, w) => s + w.length, 0) / Math.max(1, words.length);
     const shouted = /[A-Z]{4,}/.test(text);
@@ -64,49 +73,88 @@ function firstSentence(text) {
 function stripTrailingPunct(s) {
     return s.replace(/[.,;:!?\s]+$/, "");
 }
+const TEMPLATES = {
+    fr: {
+        figureAlone: (f) => `${f} — et personne n'en parle`,
+        figureHides: (f) => `Ce que ${f} cache vraiment`,
+        whyNotWorking: (t) => `Pourquoi ${t} ne marche pas pour toi`,
+        curiosityGap: (t) => `Ce que personne ne te dit sur ${t}`,
+        contrarianTruth: (t) => `La vérité sur ${t} est l'inverse`,
+        stopBelieving: (t) => `Arrête de croire ça sur ${t}`,
+        emotion: {
+            peur: (t) => `J'ai eu peur de le dire : ${t}`,
+            tristesse: (t) => `Le prix réel de ${t}`,
+            surprise: (t) => `Je ne m'attendais pas à ça avec ${t}`,
+            colere: (t) => `Ce que ${t} m'a coûté`,
+            desir: (t) => `Ce qui change tout avec ${t}`,
+            fierte: (t) => `Ce que ${t} m'a appris`,
+        },
+        emotionFallback: (t) => `Mon erreur sur ${t}`,
+        method: (a, b) => `${a} et ${b} : la méthode en 40 secondes`,
+        callout: (t) => `Si tu bloques sur ${t}, regarde ça`,
+        fallbackTopic: "ça",
+        questionSuffix: " ?",
+    },
+    en: {
+        figureAlone: (f) => `${f} — and nobody talks about it`,
+        figureHides: (f) => `What ${f} actually hides`,
+        whyNotWorking: (t) => `Why ${t} isn't working for you`,
+        curiosityGap: (t) => `What nobody tells you about ${t}`,
+        contrarianTruth: (t) => `The truth about ${t} is the opposite`,
+        stopBelieving: (t) => `Stop believing this about ${t}`,
+        emotion: {
+            peur: (t) => `I was scared to say it: ${t}`,
+            tristesse: (t) => `The real cost of ${t}`,
+            surprise: (t) => `I did not see this coming with ${t}`,
+            colere: (t) => `What ${t} cost me`,
+            desir: (t) => `What changes everything with ${t}`,
+            fierte: (t) => `What ${t} taught me`,
+        },
+        emotionFallback: (t) => `The mistake I made with ${t}`,
+        method: (a, b) => `${a} and ${b}: the method in 40 seconds`,
+        callout: (t) => `If you're stuck on ${t}, watch this`,
+        fallbackTopic: "this",
+        questionSuffix: "?",
+    },
+};
 /** Hooks construits à partir de ce que le moment contient réellement. */
 export function generateHeuristicHooks(moment) {
     const transcript = moment.transcript;
+    const lang = toLang(moment.language);
+    const T = TEMPLATES[lang];
     // Seuls les vrais nombres servent d'accroche : « deux » ne tient pas un hook.
-    const figures = extractNumericFigures(transcript);
-    const topics = extractTopics(transcript);
+    const figures = extractNumericFigures(transcript, lang);
+    const topics = extractTopics(transcript, 5, lang);
     const lead = stripTrailingPunct(firstSentence(transcript)).slice(0, 90);
-    const topic = topics[0] ?? moment.keywords[0] ?? "ça";
+    const topic = topics[0] ?? moment.keywords[0] ?? T.fallbackTopic;
     const topic2 = topics[1] ?? moment.keywords[1] ?? topic;
     const raw = [];
     // 1. Le chiffre, s'il y en a un : le hook le plus solide quand il existe.
     if (figures.length) {
-        raw.push({ text: `${figures[0]} — et personne n'en parle`, style: "chiffre" });
-        raw.push({ text: `Ce que ${figures[0]} cache vraiment`, style: "chiffre" });
+        raw.push({ text: T.figureAlone(figures[0]), style: "chiffre" });
+        raw.push({ text: T.figureHides(figures[0]), style: "chiffre" });
     }
     // 2. La question directe.
     const q = transcript.match(/[^.!?]*\?/);
     if (q)
-        raw.push({ text: stripTrailingPunct(q[0].trim()).slice(0, 80) + " ?", style: "question" });
-    raw.push({ text: `Pourquoi ${topic} ne marche pas pour toi`, style: "question" });
+        raw.push({ text: stripTrailingPunct(q[0].trim()).slice(0, 80) + T.questionSuffix, style: "question" });
+    raw.push({ text: T.whyNotWorking(topic), style: "question" });
     // 3. Le curiosity gap.
-    raw.push({ text: `Ce que personne ne te dit sur ${topic}`, style: "curiosity-gap" });
+    raw.push({ text: T.curiosityGap(topic), style: "curiosity-gap" });
     // 4. Le contrarien, si le passage contient un retournement.
     const hasTurn = (moment.criteria.find((c) => c.key === "narrative")?.points ?? 0) > 0;
     if (hasTurn)
-        raw.push({ text: `La vérité sur ${topic} est l'inverse`, style: "contrarien" });
-    raw.push({ text: `Arrête de croire ça sur ${topic}`, style: "contrarien" });
+        raw.push({ text: T.contrarianTruth(topic), style: "contrarien" });
+    raw.push({ text: T.stopBelieving(topic), style: "contrarien" });
     // 5. La confession, si le passage est chargé émotionnellement.
     if (moment.emotion) {
-        const emotionLead = {
-            peur: `J'ai eu peur de le dire : ${topic}`,
-            tristesse: `Le prix réel de ${topic}`,
-            surprise: `Je ne m'attendais pas à ça avec ${topic}`,
-            colere: `Ce que ${topic} m'a coûté`,
-            desir: `Ce qui change tout avec ${topic}`,
-            fierte: `Ce que ${topic} m'a appris`,
-        };
-        raw.push({ text: emotionLead[moment.emotion] ?? `Mon erreur sur ${topic}`, style: "confession" });
+        const confession = T.emotion[moment.emotion] ?? T.emotionFallback;
+        raw.push({ text: confession(topic), style: "confession" });
     }
     // 6. La promesse concrète.
-    raw.push({ text: `${topic} et ${topic2} : la méthode en 40 secondes`, style: "promesse" });
+    raw.push({ text: T.method(topic, topic2), style: "promesse" });
     // 7. Le callout d'audience.
-    raw.push({ text: `Si tu bloques sur ${topic}, regarde ça`, style: "callout" });
+    raw.push({ text: T.callout(topic), style: "callout" });
     // 8. La phrase du passage elle-même : souvent la meilleure accroche.
     if (lead.length <= 70)
         raw.push({ text: lead, style: "curiosity-gap" });
@@ -121,7 +169,7 @@ export function generateHeuristicHooks(moment) {
         return true;
     })
         .map((h) => {
-        const breakdown = scoreHook(h.text, transcript);
+        const breakdown = scoreHook(h.text, transcript, lang);
         return { text: h.text, style: h.style, provider: "heuristic", score: breakdown.total, scoreBreakdown: breakdown };
     })
         .sort((a, b) => b.score - a.score);

@@ -23,12 +23,10 @@ import {
   dominantEmotion,
   extractFigures,
   extractKeywords,
-  FILLERS,
-  HOUSEKEEPING,
+  type Lang,
+  lexiconFor,
   normalize,
-  STRONG_OPENERS,
-  TURN_MARKERS,
-  WEAK_OPENERS,
+  toLang,
 } from "./lexicon";
 
 export type MomentCriterion = {
@@ -54,6 +52,8 @@ export type DetectedMoment = {
   rationale: string;
   segmentIdx: number[];
   detector: string;
+  /** Langue retenue pour le scoring : les hooks doivent la reprendre. */
+  language: Lang;
 };
 
 export type DetectOptions = {
@@ -67,6 +67,13 @@ export type DetectOptions = {
    * se cannibalisent sur les réseaux.
    */
   overlapThreshold?: number;
+  /**
+   * Langue du rush, telle que la transcription la renvoie (« fr », « en-US »…).
+   * Elle choisit les lexiques : sans elle, un rush anglais passé dans les
+   * tables françaises met émotion, chiffres et retournement à zéro, et tous
+   * les candidats ressortent au même score.
+   */
+  language?: Lang | string | null;
   /** Score minimum pour être retenu. */
   minScore?: number;
 };
@@ -93,14 +100,25 @@ function wordCount(text: string): number {
   return text.split(/\s+/).filter(Boolean).length;
 }
 
-function scoreOpener(first: string): { points: number; note: string } {
+const PRONOUN_OPEN: Record<Lang, RegExp> = {
+  fr: /^(il|elle|ils|elles|ça|c'|lui|leur|ce truc|ce point)\b/,
+  en: /^(he|she|it|they|them|that|this|those|these)\b/,
+};
+
+const IMPERATIVE: Record<Lang, RegExp> = {
+  fr: /^(arrête|oublie|imagine|regarde|écoute|prends|arrêtez|pense)/,
+  en: /^(stop|forget|imagine|look|listen|take|think|picture)\b/,
+};
+
+function scoreOpener(first: string, lang: Lang): { points: number; note: string } {
+  const lex = lexiconFor(lang);
   const norm = normalize(first);
-  const strong = countMatches(norm, STRONG_OPENERS);
+  const strong = countMatches(norm, lex.strongOpeners);
   const firstWord = norm.split(/[\s,]/)[0] ?? "";
-  const weakStart = WEAK_OPENERS.some((w) => norm.startsWith(normalize(w) + " ") || firstWord === normalize(w));
+  const weakStart = lex.weakOpeners.some((w) => norm.startsWith(normalize(w) + " ") || firstWord === normalize(w));
   const isQuestion = /\?/.test(first);
-  const hasFigure = extractFigures(first).length > 0;
-  const isImperative = /^(arrête|oublie|imagine|regarde|écoute|prends|arrêtez|pense)/.test(norm);
+  const hasFigure = extractFigures(first, lang).length > 0;
+  const isImperative = IMPERATIVE[lang].test(norm);
 
   let pts = 4; // socle : une phrase existe
   if (strong > 0) pts += 7;
@@ -126,6 +144,7 @@ export function detectMoments(segments: Segment[], opts: DetectOptions = {}): De
   const limit = opts.limit ?? 8;
   const overlapThreshold = opts.overlapThreshold ?? 0.35;
   const minScore = opts.minScore ?? 30;
+  const lang = toLang(opts.language);
 
   if (segments.length === 0) return [];
   const sorted = [...segments].sort((a, b) => a.startSec - b.startSec);
@@ -141,7 +160,7 @@ export function detectMoments(segments: Segment[], opts: DetectOptions = {}): De
       if (duration < minSeconds) continue;
       if (duration > maxSeconds) break; // fenêtres suivantes encore plus longues
 
-      candidates.push(scoreWindow(window, start, end, duration));
+      candidates.push(scoreWindow(window, start, end, duration, lang));
     }
   }
 
@@ -164,37 +183,37 @@ function overlapRatio(a: DetectedMoment, b: DetectedMoment): number {
   return shortest <= 0 ? 0 : inter / shortest;
 }
 
-function scoreWindow(window: Segment[], start: number, end: number, duration: number): DetectedMoment {
+function scoreWindow(window: Segment[], start: number, end: number, duration: number, lang: Lang): DetectedMoment {
   const transcript = textOf(window);
   const norm = normalize(transcript);
   const words = wordCount(transcript);
   const wps = words / Math.max(1, duration);
 
   // ── Critère 1 : ouverture ───────────────────────────────────
-  const opener = scoreOpener(window[0].text.trim());
+  const opener = scoreOpener(window[0].text.trim(), lang);
 
   // ── Critère 2 : charge émotionnelle ─────────────────────────
-  const emo = dominantEmotion(transcript);
+  const emo = dominantEmotion(transcript, lang);
   const emotionPts = clamp(Math.round(emo.hits * 4.5), 0, WEIGHTS.emotion);
 
   // ── Critère 3 : spécificité ─────────────────────────────────
-  const figures = extractFigures(transcript);
+  const figures = extractFigures(transcript, lang);
   const specificityPts = clamp(figures.length * 4, 0, WEIGHTS.specificity);
 
   // ── Critère 4 : arc narratif ────────────────────────────────
-  const turns = countMatches(norm, TURN_MARKERS);
+  const turns = countMatches(norm, lexiconFor(lang).turnMarkers);
   const narrativePts = clamp(turns * 6, 0, WEIGHTS.narrative);
 
   // ── Critère 5 : autonomie hors contexte ─────────────────────
   const endsClean = /[.!?]$/.test(transcript);
-  const pronounOpen = /^(il|elle|ils|elles|ça|c'|lui|leur|ce truc|ce point)\b/.test(norm);
+  const pronounOpen = PRONOUN_OPEN[lang].test(norm);
   let standalonePts = WEIGHTS.standalone;
   if (!endsClean) standalonePts -= 5;
   if (pronounOpen) standalonePts -= 6;
   if (window.length === 1 && words < 18) standalonePts -= 3;
 
   // ── Critère 6 : densité utile (débit moins le remplissage) ──
-  const fillerHits = countMatches(norm, FILLERS);
+  const fillerHits = countMatches(norm, lexiconFor(lang).fillers);
   const fillerRatio = fillerHits / Math.max(1, words / 10); // pour 10 mots
   const idealWps = 2.8;
   const densityPts = clamp(
@@ -239,7 +258,7 @@ function scoreWindow(window: Segment[], start: number, end: number, duration: nu
   ];
 
   // ── Pénalités ───────────────────────────────────────────────
-  const houseHits = countMatches(norm, HOUSEKEEPING);
+  const houseHits = countMatches(norm, lexiconFor(lang).housekeeping);
   const penalties: MomentCriterion[] = [
     {
       key: "housekeeping",
@@ -279,11 +298,12 @@ function scoreWindow(window: Segment[], start: number, end: number, duration: nu
     criteria,
     penalties,
     transcript,
-    keywords: extractKeywords(transcript),
+    keywords: extractKeywords(transcript, 6, lang),
     figures,
     emotion: emo.emotion,
     rationale,
     segmentIdx: window.map((s) => s.idx),
     detector: DETECTOR_VERSION,
+    language: lang,
   };
 }

@@ -164,6 +164,8 @@ export async function detectRushMoments(
     minSeconds: opts.minSeconds ?? rush.client?.minClipSeconds ?? 15,
     maxSeconds: opts.maxSeconds ?? rush.client?.maxClipSeconds ?? 75,
     limit: opts.limit ?? rush.client?.clipsPerRush ?? 8,
+    // La langue vient de la transcription : elle choisit les lexiques.
+    language: rush.language,
   });
 
   // On repart de zéro : la détection est idempotente, mais on conserve les
