@@ -121,10 +121,41 @@ Prérequis : Node 22+, PostgreSQL 16+, **ffmpeg et ffprobe** dans le `PATH`.
 Pour la transcription locale et le suivi de visage : Python 3.10+.
 
 ```bash
-npm test          # 49 tests : qualification, plans, remappage, Metricool…
+npm test          # 59 tests : qualification, plans, remappage, lexiques, Metricool…
 npm run typecheck
 npm run build
 ```
+
+
+### Le chemin le plus court : un lien, des clips
+
+Avant même de configurer quoi que ce soit, une seule commande fait tout le
+trajet — téléchargement, transcription locale, repérage, rendu vertical
+sous-titré. Rien n'est écrit en base : c'est fait pour un premier essai.
+
+```bash
+npx tsx scripts/pipeline.ts --source https://www.twitch.tv/videos/123456789
+npx tsx scripts/pipeline.ts --source mon-rush.mp4 --clips 5 --sortie ./clips
+```
+
+| Option | Effet |
+| --- | --- |
+| `--clips N` | nombre de clips visés (3) |
+| `--sortie DOSSIER` | où déposer les MP4 (`./clips`) |
+| `--langue fr\|en` | force la langue au lieu de la deviner |
+| `--modele M` | `tiny`, `base`, `small`, `medium` (`base`) |
+| `--min` / `--max` | bornes de durée d'un clip, en secondes (15 / 75) |
+| `--cadrage M` | `face`, `cover` ou `fit-blur` |
+| `--section A-B` | ne traiter qu'une tranche du rush, en secondes |
+
+À côté des clips, `releve.json` garde ce qui a été retenu et pourquoi.
+
+**Sur la langue.** La détection automatique de Whisper se trompe, et elle se
+trompe avec aplomb : mesuré sur un rush anglais, elle annonce « français »
+avec 100 % de certitude et rend une transcription en charabia. Comme tout
+l'aval s'appuie dessus, la commande affiche un extrait et la confiance
+moyenne par mot — 0,92 quand la langue est juste, 0,30 quand elle est
+fausse — et prévient en dessous de 0,65. En cas de doute, `--langue`.
 
 ---
 
