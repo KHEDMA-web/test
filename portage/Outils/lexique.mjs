@@ -18,11 +18,21 @@ export function toLang(code) {
 /** Mots à forte charge émotionnelle, par famille. */
 export const EMOTION_LEXICON = {
     peur: ["peur", "terrifiant", "angoisse", "paniqué", "flippé", "risque", "danger", "pire", "échec", "raté", "perdu", "honte"],
-    colere: ["arnaque", "mensonge", "injuste", "scandale", "ras-le-bol", "insupportable", "trahi", "furieux"],
-    surprise: ["incroyable", "jamais", "personne", "choqué", "dingue", "fou", "inattendu", "retournement", "soudain", "brutalement"],
+    colere: [
+        "arnaque", "mensonge", "injuste", "scandale", "ras-le-bol", "insupportable", "trahi", "furieux",
+        "il m'a tué", "c'est abusé", "trop abusé", "j'en peux plus", "c'est mort",
+    ],
+    surprise: [
+        "incroyable", "jamais", "personne", "choqué", "dingue", "fou", "inattendu", "retournement",
+        "soudain", "brutalement", "j'hallucine", "t'es sérieux", "c'est quoi ce", "attends attends",
+        "non mais", "oh mon dieu", "sans déconner", "n'importe quoi", "comment c'est possible",
+    ],
     tristesse: ["seul", "solitude", "pleuré", "douleur", "regret", "manqué", "brisé", "épuisé", "fatigué", "burn-out"],
     desir: ["liberté", "rêve", "réussir", "gagner", "doubler", "exploser", "fortune", "succès", "ambition", "transformer"],
-    fierte: ["fier", "accompli", "réussi", "record", "meilleur", "champion", "première fois"],
+    fierte: [
+        "fier", "accompli", "réussi", "record", "meilleur", "champion", "première fois",
+        "j'ai réussi", "clutch", "on l'a fait", "énorme", "le goat",
+    ],
 };
 const EMOTION_LEXICON_EN = {
     peur: ["afraid", "scared", "terrifying", "terrified", "panic", "anxiety", "risk", "danger", "worst", "failure", "failed", "lost", "ashamed", "shame"],
@@ -37,6 +47,9 @@ export const TURN_MARKERS = [
     "sauf que", "mais en fait", "le problème c'est", "ce que personne", "jusqu'au jour",
     "et là", "résultat", "sauf qu'", "en réalité", "la vérité c'est", "le truc c'est",
     "ce qu'on ne te dit pas", "contre-intuitif", "à l'inverse", "pourtant", "alors que",
+    // Retournements propres au direct et au gameplay : l'instant où ça bascule.
+    "attends", "oh non", "ah non mais", "c'est bon", "ça y est", "tout ça pour",
+    "au dernier moment", "juste avant", "finalement",
 ];
 const TURN_MARKERS_EN = [
     "except that", "but actually", "the problem is", "what nobody", "what no one",

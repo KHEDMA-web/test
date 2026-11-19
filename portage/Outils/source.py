@@ -20,12 +20,77 @@ import subprocess
 import sys
 
 
+# Clients successifs tentés quand le contrôle anti-robot frappe. L'ordre
+# compte : le client par défaut d'abord, puis ceux dont l'API est la moins
+# protégée. Une liste vide signifie « sans option supplémentaire ».
+CLIENT_FALLBACKS: list[list[str]] = [
+    [],
+    ["--extractor-args", "youtube:player_client=android"],
+    ["--extractor-args", "youtube:player_client=ios"],
+    ["--extractor-args", "youtube:player_client=tv"],
+    ["--extractor-args", "youtube:player_client=web_embedded"],
+]
+
+BOT_CHECK_SIGNS = (
+    "sign in to confirm",
+    "not a bot",
+    "confirm you're not a bot",
+    "confirm you’re not a bot",
+    "this content isn't available",
+    "please sign in",
+)
+
+
+def cookie_args() -> list[str]:
+    """
+    Cookies, uniquement depuis un fichier désigné explicitement.
+
+    On ne lit jamais le navigateur de l'utilisateur : ses cookies de session
+    donnent accès à tout son compte. S'il veut en fournir, il exporte un
+    fichier et renseigne CLIPFLOW_YTDLP_COOKIES.
+    """
+    path = os.environ.get("CLIPFLOW_YTDLP_COOKIES", "").strip()
+    if path and os.path.isfile(path):
+        return ["--cookies", path]
+    return []
+
+
+def is_bot_check(text: str | None) -> bool:
+    """Le refus vient-il du contrôle anti-robot plutôt que d'une vraie erreur ?"""
+    low = (text or "").lower()
+    return any(sign in low for sign in BOT_CHECK_SIGNS)
+
+
+def bot_check_error() -> RuntimeError:
+    return RuntimeError(
+        "YouTube exige une vérification depuis cette adresse. Depuis une connexion "
+        "domestique, ça passe en général sans rien faire. Sinon, exportez vos cookies "
+        "dans un fichier et renseignez CLIPFLOW_YTDLP_COOKIES avec son chemin."
+    )
+
+
 def run_json(args: list[str]) -> dict:
-    """Appelle yt-dlp et renvoie la fiche JSON de la vidéo."""
-    proc = subprocess.run(args, capture_output=True, text=True, timeout=180)
-    if proc.returncode != 0:
-        raise RuntimeError(clean_error(proc.stderr))
-    line = next((l for l in proc.stdout.splitlines() if l.startswith("{")), None)
+    """
+    Appelle yt-dlp et renvoie la fiche JSON de la vidéo.
+
+    La même cascade de replis qu'au téléchargement s'applique ici : le
+    contrôle anti-robot frappe la lecture des métadonnées exactement comme
+    le téléchargement, et échouer dès le probe empêcherait même d'annoncer
+    la durée du rush.
+    """
+    last = None
+    for extra in CLIENT_FALLBACKS:
+        last = subprocess.run(args + cookie_args() + extra, capture_output=True, text=True, timeout=180)
+        if last.returncode == 0:
+            break
+        if not is_bot_check(last.stderr):
+            break
+
+    if last is None or last.returncode != 0:
+        message = clean_error(last.stderr) if last else "échec inconnu"
+        raise bot_check_error() if is_bot_check(message) else RuntimeError(message)
+
+    line = next((l for l in last.stdout.splitlines() if l.startswith("{")), None)
     if not line:
         raise RuntimeError("yt-dlp n'a renvoyé aucune métadonnée.")
     return json.loads(line)
@@ -107,13 +172,7 @@ def download(url: str, out: str, max_height: int, start: float | None, end: floa
 
     if last is None or last.returncode != 0:
         message = clean_error(last.stderr) if last else "échec inconnu"
-        if is_bot_check(message):
-            raise RuntimeError(
-                "YouTube exige une vérification depuis cette adresse. Depuis une connexion "
-                "domestique, ça passe en général sans rien faire. Sinon, exportez vos cookies "
-                "dans un fichier et renseignez CLIPFLOW_YTDLP_COOKIES avec son chemin."
-            )
-        raise RuntimeError(message)
+        raise bot_check_error() if is_bot_check(message) else RuntimeError(message)
 
     # yt-dlp peut changer l'extension au moment de la fusion.
     path = out if os.path.exists(out) else find_output(out)
@@ -148,8 +207,7 @@ def record(url: str, out: str, seconds: int, max_height: int) -> dict:
         "--downloader", "ffmpeg",
         "--downloader-args", f"ffmpeg_i:-t {seconds}",
         "-o", out,
-        url,
-    ]
+    ] + cookie_args() + [url]
     proc = subprocess.run(args, capture_output=True, text=True, timeout=seconds + 600)
     path = out if os.path.exists(out) else find_output(out)
     if not path:

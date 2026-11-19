@@ -400,6 +400,13 @@ async function main() {
     assert(extractTopics("l'émotion de cette méthode").includes("émotion"), "élision cassée");
   });
 
+  check("le vocabulaire de réaction est reconnu", () => {
+    // Un rush Twitch ou de gameplay ne parle pas comme un podcast : sans ces
+    // entrées, « non mais t'es sérieux là » ne pesait rien au scoring.
+    assert(dominantEmotion("non mais t'es sérieux là, j'hallucine").emotion === "surprise", "surprise non détectée");
+    assert(dominantEmotion("on l'a fait, énorme, clutch de ouf").emotion === "fierte", "fierté non détectée");
+  });
+
   check("les tables françaises restent inchangées par défaut", () => {
     assert(dominantEmotion("j'étais terrifié, un échec total").emotion === "peur", "émotion française perdue");
     assert(extractFigures("il m'a fallu 3 ans et 40 %").length >= 2, "chiffres français perdus");
