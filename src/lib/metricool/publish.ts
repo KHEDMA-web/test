@@ -65,6 +65,20 @@ export async function queueClipPublications(input: QueueInput): Promise<Publicat
     throw new Error("Le clip n'a pas d'URL publique : Metricool exige un média accessible et non expirant.");
   }
 
+  // Un clip déjà en file ne se remet pas en file : sinon le client reçoit
+  // deux fois le même post. Il faut retirer les publications d'abord.
+  const dejaEnFile = await prisma.publication.findMany({
+    where: { clipId: clip.id, status: { in: ["QUEUED", "SCHEDULING", "SCHEDULED", "PUBLISHED"] } },
+    select: { network: true, status: true },
+  });
+  const collision = dejaEnFile.filter((p) => input.networks.includes(p.network as MetricoolNetwork));
+  if (collision.length > 0) {
+    throw new Error(
+      `Ce clip est déjà programmé sur ${collision.map((p) => p.network).join(", ")}. ` +
+        "Annulez ces publications avant d'en créer d'autres.",
+    );
+  }
+
   const timezone = input.timezone ?? config.metricool.timezone;
   const blogId = input.blogId ?? clip.client?.metricoolBlogId ?? config.metricool.blogId ?? "";
   const baseText = input.text ?? clip.caption ?? clip.hook?.text ?? clip.title;

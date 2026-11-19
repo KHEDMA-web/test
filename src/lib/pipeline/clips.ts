@@ -257,8 +257,10 @@ export async function reviewClip(args: {
     data: { status, approvedAt: args.decision === "APPROVED" ? new Date() : null },
   });
 
-  // Un clip validé compte dans le quota mensuel du client.
-  if (args.decision === "APPROVED" && clip.clientId) {
+  // Un clip validé compte dans le quota mensuel du client — une seule
+  // fois : valider deux fois le même clip ne livre pas deux clips.
+  const dejaCompte = ["APPROVED", "SCHEDULED", "PUBLISHED"].includes(clip.status);
+  if (args.decision === "APPROVED" && clip.clientId && !dejaCompte) {
     await prisma.client.update({
       where: { id: clip.clientId },
       data: { clipsDelivered: { increment: 1 } },
